@@ -119,6 +119,98 @@ Send a Chat Completions test request:
 ./tests/vllm-test.sh
 ```
 
+## CPU Inference With QAT
+
+Build with `DEVICE=cpu` to run the model on CPU while offloading KV cache
+compression and decompression to QAT (or IAA). This uses the same `KVStore`,
+asynchronous native queues, codecs, and persist/evict APIs as GPU inference.
+With the vLLM CPU layout (blocks on axis 0) the codec reads and writes KV blocks
+in place, so no scratch buffers are used; byte shuffle or lossy truncation, which
+rewrite the codec input, fall back to scratch buffers. CUDA, SYCL and GDRCopy are
+not required.
+
+Use a CPU-enabled PyTorch/vLLM environment. Install the Python build requirements
+and native development dependencies, including a C/C++ compiler, CMake, NASM,
+SQLite, and zlib. NASM is needed by the existing QPL dependency even when IAA is
+disabled at runtime.
+
+For the in-tree driver with system qatlib (see Host Setup), build with
+`IAXL_QATLIB=intree`:
+
+```bash
+python -m pip install -r requirements.txt
+DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation
+```
+
+For the out-of-tree driver package, leave `IAXL_QATLIB` unset (`oot`). That build
+additionally needs Boost/Boost Regex, SSL, udev, and netlink development packages.
+Match the user-space library to the host driver: the out-of-tree runtime expects
+`/dev/qat_dev_processes`; qatlib uses the host's VFIO setup. Do not install the
+GPU-only GDRCopy/DSA components for CPU inference.
+
+Start CPU serving with the standalone CPU launcher, without sourcing the
+GPU-topology-based `setvars.sh`:
+
+```bash
+MODEL=Qwen/Qwen3-0.6B taskset -c 0-31 ./examples/kvshrink-vllm-cpu-serve.sh
+```
+
+The launcher splits the CPUs it may run on evenly between ranks and gives the last
+`IAXL_CORES` (default 2) of each rank's share to IAXL; set `VLLM_CPU_OMP_THREADS_BIND`,
+`KVSHRINK_CPU_OMP_THREADS_BIND` and `OMP_NUM_THREADS` together to place them
+yourself (see the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md)). It uses
+QAT-only compression, BF16, one worker, block size 32, and port
+8000; `KVSHRINK_CONNECTOR=0` serves plain vLLM with its own prefix cache instead.
+`VLLM_CPU_KVCACHE_SPACE` controls the live CPU KV cache size in GiB;
+`IAXL_DDR_POOL_SIZE_GB` independently controls the compressed cache. CPU persisted
+data lives under `IAXL_CACHE_DIR/cpu/{compressed,raw}` to avoid reusing incompatible
+GPU tensor layouts. Compression format and lossless/lossy settings are unchanged.
+
+### Core budget
+
+On CPU every core the cache path occupies is a core the model does not have, so
+the two are partitioned explicitly:
+
+- `VLLM_CPU_OMP_THREADS_BIND` places the inference OpenMP threads.
+- `KVSHRINK_CPU_OMP_THREADS_BIND` (one `|`-separated entry per rank, for example
+  `30-31|62-63`) pins every IAXL native thread of that rank: the codec pollers, the
+  transfer and record queue threads. The connector refuses to start when more than
+  one codec thread would share the rank's inference CPUs (unset or overlapping), and
+  warns for a single thread. For multiple ranks, also set `TP_SIZE` and
+  `KVSHRINK_QAT_DEVICES` (for example, `0|1`).
+- `IAXL_USE_OMP=0` (the launcher default) runs IAXL on its own thread pool, off
+  vLLM's OpenMP runtime; idle pool threads sleep.
+- One codec thread per QAT device (and one for IAA) polls all of that backend's
+  instances; `IAXL_OMP_THREAD_NUM` overrides the count, independently of
+  inference's `OMP_NUM_THREADS`.
+
+A CPU attention block has `2 * num_kv_heads * block_size * head_size * dtype_bytes`
+bytes per layer. Keep it within `IAXL_ZIP_SRC_CAP`, and size `IAXL_ZIP_DST_CAP` for
+the compressed output, or reduce `BLOCK_SIZE`. Both capacities default to 256 KiB.
+
+Run the CPU regression suite without QAT hardware, or require QAT-only operation:
+
+```bash
+python -u -m unittest discover -s tests -p test_cpu_inference.py -v
+IAXL_TEST_ZIP_BACKEND=qat \
+	python -u -m unittest discover -s tests -p test_cpu_inference.py -v
+```
+
+The tests cover block layouts, FP32/FP16/BF16, raw and mixed-layer compression,
+asynchronous waits, native-thread affinity, and persisted reloads. An opt-in inference
+smoke test uses a cached `Qwen/Qwen3-0.6B` snapshot (or `IAXL_TEST_MODEL`, a local
+model path or cached model ID), disables vLLM prefix caching, and requires actual
+external-cache hits and identical cold/warm generated token IDs:
+
+```bash
+IAXL_TEST_ZIP_BACKEND=qat IAXL_TEST_VLLM=1 \
+	python -u -m unittest discover -s tests -p test_cpu_inference.py -v
+```
+
+The smoke test uses async loading by default; set `IAXL_TEST_ASYNC_LOAD_LAYERS=0`
+to check synchronous loading. This is a correctness check, not a performance
+benchmark. Check for other workloads before running hardware tests.
+
 ## KVShrink vLLM Benchmark
 
 Keep the KVShrink vLLM service running and execute the online serving benchmark in the second container terminal:
