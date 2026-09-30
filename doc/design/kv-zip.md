@@ -69,7 +69,7 @@ Every stored block starts with an 8-byte header in front of its payload.
 
 | Word | Content |
 | --- | --- |
-| 0 | Payload length; bit 31 is set when IAA produced the stream |
+| 0 | Payload length; bit 31 is set when IAA produced the stream, bit 30 when the data was byte-shuffled before compression |
 | 1 | Original byte size; `0` marks a raw (uncompressed) block |
 
 Decompression routes each block by its header:
@@ -79,6 +79,8 @@ Decompression routes each block by its header:
 - All other blocks go to QAT or CPU workers.
 
 IAA and QAT/CPU blocks are tracked with two separate cursors. Batches stored without compression (`IAXL_KV_COMPRESSION=0`, or leading layers that bypass compression) use the raw path in both directions.
+
+Decompression undoes the byte shuffle only when bit 30 is set, not according to the current `IAXL_KV_DATA_SHUFFLE`, so a persisted cache decodes correctly after the setting changes. Persisted caches also record a format version; a cache written before the shuffle bit existed is reused only while shuffle is off.
 
 ## Threading Runtime
 
