@@ -64,9 +64,6 @@ void context_sync_cur(context_t) {}
 void copy_chunk(context_t ctx, char *cpu_base, int64_t chunk_index, bool h2d) {
     const auto *context = static_cast<const XferContext *>(ctx);
     char *tensor_base = context->tensor_base + chunk_index * context->chunk_stride;
-    // The chunk is already in place when the codec was given a view of the tensor.
-    if (tensor_base == cpu_base)
-        return;
     for (int64_t outer = 0; outer < context->outer_dims; outer++) {
         char *tensor_ptr = tensor_base + outer * context->outer_block_size;
         char *scratch_ptr = cpu_base + outer * context->inner_size;

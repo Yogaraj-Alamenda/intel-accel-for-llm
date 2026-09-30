@@ -101,11 +101,11 @@ Send a Chat Completions test request:
 
 Build with `DEVICE=cpu` to run the model on CPU while offloading KV cache
 compression and decompression to QAT (or IAA). This uses the same `KVStore`,
-asynchronous native queues, codecs, and persist/evict APIs as GPU inference.
-With the vLLM CPU layout (blocks on axis 0) the codec reads and writes KV blocks
-in place, so no scratch buffers are used; byte shuffle or lossy truncation, which
-rewrite the codec input, fall back to scratch buffers. CUDA, SYCL and GDRCopy are
-not required.
+asynchronous native queues, codecs, and persist/evict APIs as GPU inference. On
+CPU the codec works on the inference tensor in place: PUT gathers a block straight
+into the accelerator's staging buffer and GET decompresses straight back into the
+KV tensor, so no scratch snapshot is taken and no host-to-host copy of the
+uncompressed block is made by the CPU. CUDA, SYCL and GDRCopy are not required.
 
 Use a CPU-enabled PyTorch/vLLM environment. Install the Python build requirements
 and native development dependencies, including a C/C++ compiler, CMake, NASM,
@@ -175,7 +175,8 @@ IAXL_TEST_ZIP_BACKEND=qat \
 ```
 
 The tests cover block layouts, FP32/FP16/BF16, raw and mixed-layer compression,
-asynchronous waits, native-thread affinity, and persisted reloads. An opt-in inference
+asynchronous waits, the direct (scratch-free) codec path, native-thread affinity,
+and persisted reloads. An opt-in inference
 smoke test uses a cached `Qwen/Qwen3-0.6B` snapshot (or `IAXL_TEST_MODEL`, a local
 model path or cached model ID), disables vLLM prefix caching, and requires actual
 external-cache hits and identical cold/warm generated token IDs:

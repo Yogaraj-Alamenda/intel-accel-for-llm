@@ -9,7 +9,7 @@ The design keeps model kernels unchanged. Integrations use the Python `KVStore` 
 ## Responsibilities
 
 - Store and retrieve KV blocks by stable hashes.
-- Move fragmented KV blocks between GPU and CPU memory.
+- Move fragmented KV blocks between GPU and CPU memory, or codec them in place for CPU inference.
 - Compress cached data with Intel QuickAssist Technology (QAT) or Intel In-Memory Analytics Accelerator (IAA), with a compatible CPU DEFLATE backend.
 - Keep hot data in a capacity-bounded DDR cache and optionally persist groups to local storage.
 - Execute transfer, compression, and storage work asynchronously and expose completion through task handles.
@@ -61,15 +61,21 @@ On `PUT`, IAXL copies selected chunks from inference tensors into reusable CPU b
 
 ### CPU Inference
 
-`DEVICE=cpu` keeps the same `Context`/`KVStore` API and codec. When blocks lie on
-axis 0 (the vLLM 0.23 CPU layout `[blocks, heads, tokens, 2·head_size]`), each block
-is a contiguous slice of the KV tensor, so KVFlow hands those slices to the codec
-directly: PUT compresses from the block and GET decompresses into it, with no
-scratch buffers and no `ScratchPool`. Byte shuffle and lossy truncation rewrite the
-codec input in place, so with either enabled, and for other layouts, blocks go
-through scratch buffers with a host `memcpy`. Because on CPU every core the cache
-path occupies is a core taken from the model's own GEMMs, IAXL threads are placed
-explicitly.
+`DEVICE=cpu` keeps the same `Context`/`KVStore` API but changes the data path, because
+on CPU every byte the cache path moves is DRAM bandwidth and a core taken from the
+model's own GEMMs.
+
+**Direct codec path (no scratch).** Blocks are addressed as `ChunkView`s: strided
+slices of the inference tensor (`outer_dims` runs of `inner_size` bytes). On PUT the
+codec worker gathers the view straight into the accelerator's own staging buffer
+(QAT/IAA DMA buffer or the zlib slot buffer), applies lossy truncation and byte
+shuffle there, and submits; the inference tensor is only ever read. On GET the
+worker undoes the shuffle inside the codec's output buffer and scatters it straight
+into the KV tensor. Compared with the GPU-style staging path this removes the
+snapshot copy, the scratch-to-staging copy and the single-threaded transfer-queue
+copy — three DRAM passes over the uncompressed block. No `ScratchPool` is created
+on CPU. Raw (uncompressed) blocks are a single
+gather/scatter between the KV tensor and the cache payload.
 
 **Core partitioning.** `IAXL_CPU_AFFINITY` pins every IAXL native thread (the
 `H2D`/`D2H`/`OMP-Main` queue workers and each codec OpenMP worker) to a CPU list
@@ -104,7 +110,7 @@ Optional byte shuffling improves BF16 compressibility, and independently configu
 
 - **Asynchronous pipeline:** native work queues, plus device streams on GPUs, overlap transfer, compression, and inference where dependencies allow.
 - **Batch-oriented movement:** block fragments are copied in batches; DSA requires an 8-byte-aligned inner copy width, and unsupported layouts automatically use CUDA copies.
-- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the hot path.
+- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the GPU hot path; CPU inference codecs the KV tensor directly and needs no scratch buffers.
 - **Hybrid compression:** QAT and IAA provide the accelerated paths; CPU workers provide additional throughput and a compatible software path.
 - **Selective compression:** latency-sensitive leading layers can bypass compression while later layers remain compressed.
 - **Capacity management:** grouped entries, LRU tracking, and explicit persist/evict operations bound DDR use without changing block identity.

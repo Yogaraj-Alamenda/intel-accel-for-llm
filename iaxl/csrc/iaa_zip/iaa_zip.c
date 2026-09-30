@@ -341,7 +341,8 @@ static int submit_slot(int slot, int compress, void *src, int len) {
     if ((uint32_t)len > (compress ? g_src_cap : g_dst_cap))
         return -1;
 
-    memcpy(sl->in, src, (size_t)len);
+    if (src != sl->in)
+        memcpy(sl->in, src, (size_t)len);
     sl->compress = compress;
     sl->in_len = (uint32_t)len;
     prepare_job(sl);
@@ -359,6 +360,15 @@ static int submit_slot(int slot, int compress, void *src, int len) {
 
 int iaa_zip_compress(int slot, void *src, int len) { return submit_slot(slot, 1, src, len); }
 int iaa_zip_decompress(int slot, void *src, int len) { return submit_slot(slot, 0, src, len); }
+
+void *iaa_zip_input_buf(int slot) {
+    IaaSlot *sl = resolve_slot(slot);
+    return sl ? sl->in : NULL;
+}
+
+int iaa_zip_compress_staged(int slot, int len) {
+    return submit_slot(slot, 1, iaa_zip_input_buf(slot), len);
+}
 
 int iaa_zip_wait(int slot, void **dest, int *len) {
     IaaSlot *sl = resolve_slot(slot);

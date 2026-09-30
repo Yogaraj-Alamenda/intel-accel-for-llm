@@ -66,6 +66,42 @@ class CPUInferenceTests(unittest.TestCase):
         self.assertIsNone(self.flow.put_stream)
         self.assertIsNone(self.flow.get_stream)
 
+    def test_direct_codec_bypasses_scratch_pool(self):
+        self.assertTrue(self.flow.direct_codec)
+        tensor = (torch.arange(2 * 6 * 2 * 32 * 64) % 19).to(torch.bfloat16)
+        tensor = tensor.reshape(2, 6, 2, 32, 64)
+        original = tensor.clone()
+        labels = ["direct4", "direct0", "direct2"]
+        indices = [4, 0, 2]
+        tasks = self.flow.put("kv", {"layer0": tensor}, 1, indices, labels)
+        self.assertTrue(all(task.cpu_tensors is None for task in tasks.values()))
+        self.flow.put_wait(tasks)
+        self.assertTrue(torch.equal(tensor, original), "PUT must not modify the KV tensor")
+        tensor.fill_(-1)
+        tasks = self.flow.get("kv", {"layer0": tensor}, 1, indices, labels)
+        self.assertTrue(all(task.cpu_tensors is None for task in tasks.values()))
+        self.flow.get_wait(tasks)
+        for index in range(tensor.shape[1]):
+            expected = original.select(1, index) if index in indices else torch.full_like(
+                original.select(1, index), -1)
+            self.assertTrue(torch.equal(tensor.select(1, index), expected), index)
+        status = self.flow.status()
+        self.assertEqual(status["pool_in_use"], 0)
+        self.assertIsNone(self.flow.chunk_pool, "scratch pool must not be created")
+
+    def test_direct_codec_rejects_out_of_range_chunks(self):
+        tensor = torch.zeros((2, 4, 16), dtype=torch.bfloat16)
+        for direction, method in (
+            (torch_ext.GpuTransferDirection.D2H, "zip_to_mem_direct"),
+            (torch_ext.GpuTransferDirection.H2D, "unzip_from_mem_direct"),
+        ):
+            with self.subTest(method=method):
+                context = torch_ext.Context.create(tensor, 1, direction)
+                with self.assertRaisesRegex(RuntimeError, "out of range"):
+                    getattr(context, method)(self.flow.mem, "kv", "layer0", ["a"], [4])
+                with self.assertRaisesRegex(RuntimeError, "must match"):
+                    getattr(context, method)(self.flow.mem, "kv", "layer0", ["a", "b"], [0])
+
     NATIVE_THREAD_PROBE = textwrap.dedent(
         """
         import json, os, sys, tempfile
@@ -237,11 +273,9 @@ class CPUInferenceTests(unittest.TestCase):
         """
         import tempfile
         import torch
-        from iaxl import torch_ext
         from iaxl.envs import envs
         from iaxl.kvflow import KVFlow
 
-        assert not torch_ext.codec_rewrites_input
         with tempfile.TemporaryDirectory() as directory:
             envs.IAXL_CACHE_DIR = directory
             flow = KVFlow("in-place", cache_size_gb=0.05)
@@ -321,7 +355,9 @@ class CPUInferenceTests(unittest.TestCase):
             torch_ext.Context.create(tensor, 0, work_stream=object())
 
     def test_raw_and_compressed_round_trips(self):
-        layouts = (((7, 2, 16, 64), 0), ((2, 7, 16, 64), 1), ((2, 3, 7, 64), 2))
+        # (3, 5, 16, 64) on dim 1 gives three segments, so the shuffle half-way point splits one.
+        layouts = (((7, 2, 16, 64), 0), ((2, 7, 16, 64), 1), ((2, 3, 7, 64), 2),
+                   ((3, 5, 16, 64), 1))
         source_indices = [4, 1, 3]
         target_indices = [2, 4, 0]
 
