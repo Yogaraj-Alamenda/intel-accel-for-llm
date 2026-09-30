@@ -207,6 +207,13 @@ The smoke test uses async loading by default; set `IAXL_TEST_ASYNC_LOAD_LAYERS=0
 to check synchronous loading. This is a correctness check, not a performance
 benchmark. Check for other workloads before running hardware tests.
 
+### CPU serving benchmark
+
+`benchmark/kvstore/serving_benchmark.sh` is the serving benchmark. It drives
+`vllm bench serve` with the same client settings as `tests/vllm-benchmark.sh`, so CPU
+and GPU numbers come from the same load generator. Pick the backends with `ARMS`
+(`raw`, `sw`, `qat`, `vllm`); see [benchmark/README.md](benchmark/README.md#cpu-serving).
+
 ## KVShrink vLLM Benchmark
 
 Keep the KVShrink vLLM service running and execute the online serving benchmark in the second container terminal:
