@@ -105,7 +105,8 @@ asynchronous native queues, codecs, and persist/evict APIs as GPU inference. On
 CPU the codec works on the inference tensor in place: PUT gathers a block straight
 into the accelerator's staging buffer and GET decompresses straight back into the
 KV tensor, so no scratch snapshot is taken and no host-to-host copy of the
-uncompressed block is made by the CPU. CUDA, SYCL and GDRCopy are not required.
+uncompressed block is made by the CPU. CUDA, SYCL and GDRCopy are not required;
+Intel DSA is optional (see below).
 
 Use a CPU-enabled PyTorch/vLLM environment. Install the Python build requirements
 and native development dependencies, including a C/C++ compiler, CMake, NASM,
@@ -164,6 +165,20 @@ the two are partitioned explicitly:
 - The compression OpenMP team is sized from the poller counts and
   `IAXL_CPU_ZIP_THREADS`, independently of inference's `OMP_NUM_THREADS`.
 
+### Intel DSA on CPU
+
+`IAXL_DSA_MEMCPY_ENABLE=1` moves the pure-copy work of the CPU path to the DSA work
+queues named in `IAXL_DSA_WQS`, using host virtual addresses (no GDRCopy): raw
+(uncompressed) blocks in both directions, including layers excluded by
+`IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS`, and the QAT/IAA per-block copies (compressed
+payload into the device buffer, unshuffled gather/scatter), which run asynchronously
+beside the codec. It needs a user-mode DSA WQ (`/dev/dsa/wqX.Y`, see
+`tools/setup_dsa.sh`); if the WQ cannot be used the process logs one warning and
+falls back to `memcpy` for the rest of its life. Byte-shuffled blocks are transformed
+on the CPU, so `IAXL_KV_DATA_SHUFFLE=1` trades restore throughput for capacity: on
+Qwen3-8B it saves 28% of KV bytes instead of 19%, but at 8192 tokens fully cached it
+runs at 0.84x raw+DSA, while shuffle off matches raw+DSA. The launcher defaults it off.
+
 A CPU attention block has `2 * num_kv_heads * block_size * head_size * dtype_bytes`
 bytes per layer. Keep it within `IAXL_ZIP_SRC_CAP`, and size `IAXL_ZIP_DST_CAP` for
 the compressed output, or reduce `BLOCK_SIZE`. Both capacities default to 256 KiB.
@@ -178,7 +193,7 @@ IAXL_TEST_ZIP_BACKEND=qat \
 
 The tests cover block layouts, FP32/FP16/BF16, raw and mixed-layer compression,
 asynchronous waits, the direct (scratch-free) codec path, native-thread affinity,
-QAT poller consolidation, and persisted reloads. An opt-in inference
+DSA fallback, QAT poller consolidation, and persisted reloads. An opt-in inference
 smoke test uses a cached `Qwen/Qwen3-0.6B` snapshot (or `IAXL_TEST_MODEL`, a local
 model path or cached model ID), disables vLLM prefix caching, and requires actual
 external-cache hits and identical cold/warm generated token IDs:

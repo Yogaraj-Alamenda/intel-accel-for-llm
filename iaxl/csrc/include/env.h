@@ -71,6 +71,10 @@ struct Envs {
 
     bool IAXL_DSA_GD_ENABLE;
     bool IAXL_DSA_GD_RESET_ON_DESTROY;
+    // Host-to-host DSA memcpy for the pure-copy segments of the CPU inference path.
+    bool IAXL_DSA_MEMCPY_ENABLE;
+    // Batches smaller than this stay on memcpy: DSA submit+completion latency exceeds the copy.
+    size_t IAXL_DSA_MEMCPY_MIN_BYTES;
     const char *(*IAXL_DSA_WQS)(void);
 
     // CPU list ("32-35,40") for every IAXL native thread; empty leaves the inherited mask.

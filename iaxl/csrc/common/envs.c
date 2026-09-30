@@ -161,6 +161,9 @@ __attribute__((constructor(101))) void envs_init(void) {
 
     envs.IAXL_DSA_GD_ENABLE = env_bool("IAXL_DSA_GD_ENABLE", 0);
     envs.IAXL_DSA_GD_RESET_ON_DESTROY = env_bool("IAXL_DSA_GD_RESET_ON_DESTROY", 0);
+    envs.IAXL_DSA_MEMCPY_ENABLE = env_bool("IAXL_DSA_MEMCPY_ENABLE", 0);
+    envs.IAXL_DSA_MEMCPY_MIN_BYTES =
+        (size_t)env_nonnegative_int("IAXL_DSA_MEMCPY_MIN_BYTES", 1024 * 1024);
     envs.IAXL_CPU_AFFINITY = env_str("IAXL_CPU_AFFINITY", "");
 
     envs.IAXL_DEBUG_LOG = env_bool("IAXL_DEBUG_LOG", 0);
@@ -194,7 +197,7 @@ __attribute__((constructor(101))) void envs_init(void) {
              "qat_pollers=%d iaa_instances=%d iaa_pollers=%d cpu_zip_threads=%d "
              "omp_threads=%d cpus=%d affinity=%s "
                "compression=%s data_shuffle=%s lossy_trunc=%d dsa_gd=%s "
-               "dsa_gd_reset=%s "
+               "dsa_gd_reset=%s dsa_memcpy=%s dsa_memcpy_min_bytes=%zu "
                "profile=%s\n",
                envs.IAXL_QAT_ZIP_ENABLE ? "ON" : "OFF",
                envs.IAXL_IAA_ZIP_ENABLE ? "ON" : "OFF",
@@ -206,6 +209,7 @@ __attribute__((constructor(101))) void envs_init(void) {
                envs.IAXL_KV_DATA_SHUFFLE ? "ON" : "OFF", envs.IAXL_KV_LOSSY_TRUNC,
                envs.IAXL_DSA_GD_ENABLE ? "ON" : "OFF",
                envs.IAXL_DSA_GD_RESET_ON_DESTROY ? "ON" : "OFF",
+               envs.IAXL_DSA_MEMCPY_ENABLE ? "ON" : "OFF", envs.IAXL_DSA_MEMCPY_MIN_BYTES,
                envs.IAXL_PROFILE_MODE);
     }
 }

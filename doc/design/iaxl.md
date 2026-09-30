@@ -92,6 +92,18 @@ nothing in a full pass spins on `pause` for a bounded count, then `sched_yield`s
 One poller can therefore keep several QAT instances saturated from a single core.
 IAA's wait loop uses the same bounded-spin policy as QAT.
 
+**Intel DSA for host copies.** CPU builds compile the host-only `dsa_memcpy`
+(no GDRCopy). With `IAXL_DSA_MEMCPY_ENABLE=1`, raw blocks in both directions are
+issued as a DSA batch through the work queues in `IAXL_DSA_WQS` using user virtual
+addresses (8-byte aligned segments, batches of at least `IAXL_DSA_MEMCPY_MIN_BYTES`).
+QAT/IAA slots additionally run as a stage machine — staging copies, codec, scatter
+copies — whose per-block copies (payload into the device input buffer, unshuffled
+gather into it, and unshuffled scatter into the KV tensor) are submitted to DSA
+asynchronously, so a poller keeps its other slots busy while DSA moves the bytes.
+Async copies hold a per-WQ credit because a dedicated WQ drops submissions beyond
+its size. On the first failure the process warns once and stays on `memcpy`.
+Shuffled blocks are transformed on the CPU in the same pass as the gather/scatter.
+
 The CPU connector derives the block axis from the attention layout (`[2, blocks,
 heads, tokens, head_size]` with block dimension 1, or the HND `[blocks, heads,
 tokens, 2·head_size]` layout with block dimension 0). CPU persistence has a separate

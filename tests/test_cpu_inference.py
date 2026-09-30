@@ -155,6 +155,69 @@ class CPUInferenceTests(unittest.TestCase):
             self.assertEqual(masks[name], [pinned], f"{name} thread not pinned: {masks}")
         self.assertNotEqual(masks["python"], [pinned], "the Python threads must keep their mask")
 
+    def test_dsa_memcpy_falls_back_without_hardware(self):
+        _, output = self._run_native_probe(IAXL_DSA_MEMCPY_ENABLE="1",
+                                           IAXL_DSA_MEMCPY_MIN_BYTES="0",
+                                           IAXL_DSA_WQS="wq-iaxl-does-not-exist")
+        self.assertIn("dsa_memcpy=ON", output)
+        self.assertEqual(output.count("falling back to CPU memcpy"), 1, output)
+
+    def test_dsa_memcpy_skips_small_batches(self):
+        _, output = self._run_native_probe(IAXL_DSA_MEMCPY_ENABLE="1",
+                                           IAXL_DSA_WQS="wq-iaxl-does-not-exist")
+        self.assertIn("dsa_memcpy_min_bytes=1048576", output)
+        # Device codecs may queue per-block staging copies on DSA regardless of the batch floor.
+        if ZIP_BACKEND == "cpu":
+            self.assertNotIn("falling back to CPU memcpy", output)
+
+    DSA_CODEC_PROBE = textwrap.dedent(
+        """
+        import tempfile
+        import torch
+        from iaxl.envs import envs
+        from iaxl.kvflow import KVFlow
+
+        torch.manual_seed(0)
+        with tempfile.TemporaryDirectory() as directory:
+            envs.IAXL_CACHE_DIR = directory
+            flow = KVFlow("dsa-probe", cache_size_gb=0.05)
+            # Blocks on axis 1 (two strided segments each) and on axis 0 (one contiguous run).
+            for name, shape, dim in (("kv5d", (2, 12, 4, 32, 64), 1), ("kv4d", (12, 8, 32, 256), 0)):
+                tensor = (torch.randn(shape) * 0.05).to(torch.bfloat16)
+                original = tensor.clone()
+                labels = [f"{name}{i}" for i in range(0, 12, 2)]
+                indices = list(range(0, 12, 2))
+                flow.put_wait(flow.put("kv", {name: tensor}, dim, indices, labels))
+                assert torch.equal(tensor, original), "PUT modified the KV tensor"
+                tensor.fill_(0)
+                flow.get_wait(flow.get("kv", {name: tensor}, dim, indices, labels))
+                for index in range(12):
+                    got, want = tensor.select(dim, index), original.select(dim, index)
+                    assert torch.equal(got, want if index in indices else torch.zeros_like(want)), (
+                        name, index)
+            flow.stop()
+        print("PROBE-OK")
+        """
+    )
+
+    @unittest.skipUnless(ZIP_BACKEND == "qat" and os.path.exists("/dev/dsa/wq0.0"),
+                         "requires QAT hardware and DSA work queue wq0.0")
+    def test_qat_codec_copies_run_on_dsa(self):
+        for shuffle in ("0", "1"):
+            with self.subTest(shuffle=shuffle):
+                completed = subprocess.run(
+                    [sys.executable, "-u", "-c", self.DSA_CODEC_PROBE],
+                    env={**os.environ, "IAXL_DSA_MEMCPY_ENABLE": "1", "IAXL_DSA_WQS": "wq0.0",
+                         "IAXL_KV_DATA_SHUFFLE": shuffle},
+                    capture_output=True, text=True, timeout=300,
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                )
+                output = completed.stdout + completed.stderr
+                self.assertEqual(completed.returncode, 0, output)
+                self.assertIn("PROBE-OK", output)
+                self.assertIn("codec staging copies: using Intel DSA", output)
+                self.assertNotIn("falling back to CPU memcpy", output)
+
     @unittest.skipUnless(ZIP_BACKEND == "qat", "requires QAT hardware")
     def test_qat_single_poller_drives_all_instances(self):
         _, output = self._run_native_probe(IAXL_QAT_POLL_THREADS="1")

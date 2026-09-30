@@ -5,6 +5,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "kv_zip.h"
+
 namespace kv_xfer {
 
 struct XferContext {
@@ -80,8 +82,21 @@ void copy_chunks_batch(context_t ctx, const std::vector<int64_t> &chunk_indices,
     if (chunk_indices.size() != cpu_ptrs.size()) {
         throw std::invalid_argument("Chunk index and scratch buffer counts must match");
     }
-    for (size_t chunk = 0; chunk < chunk_indices.size(); chunk++)
-        copy_chunk(ctx, cpu_ptrs[chunk], chunk_indices[chunk], h2d);
+    const auto *context = static_cast<const XferContext *>(ctx);
+    std::vector<kv_zip::CopySegment> segments;
+    segments.reserve(chunk_indices.size() * context->outer_dims);
+    for (size_t chunk = 0; chunk < chunk_indices.size(); chunk++) {
+        char *tensor_base = context->tensor_base + chunk_indices[chunk] * context->chunk_stride;
+        for (int64_t outer = 0; outer < context->outer_dims; outer++) {
+            char *tensor_ptr = tensor_base + outer * context->outer_block_size;
+            char *scratch_ptr = cpu_ptrs[chunk] + outer * context->inner_size;
+            const size_t n = static_cast<size_t>(context->inner_size);
+            segments.push_back(h2d ? kv_zip::CopySegment{tensor_ptr, scratch_ptr, n}
+                                   : kv_zip::CopySegment{scratch_ptr, tensor_ptr, n});
+        }
+    }
+    // Runs on the single transfer thread, so DSA (when enabled) is the only way to parallelise.
+    kv_zip::copy_segments(segments, false);
 }
 
 }

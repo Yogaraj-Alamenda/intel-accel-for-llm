@@ -92,6 +92,11 @@ elseif(DEVICE STREQUAL "xpu")
     list(APPEND IAXL_SRCS "${IAXL_CSRC_DIR}/kv_xfer/xpu.cpp")
 else()
     list(APPEND IAXL_SRCS "${IAXL_CSRC_DIR}/kv_xfer/cpu.cpp")
+    # Host-only DSA memcpy (no GDRCopy) for the pure-copy segments of the CPU path.
+    set(DSA_MEMCPY_SRC "${IAXL_CSRC_DIR}/dsa_gd/dsa_memcpy.c")
+    list(APPEND IAXL_SRCS ${DSA_MEMCPY_SRC})
+    set_source_files_properties(${DSA_MEMCPY_SRC} PROPERTIES COMPILE_OPTIONS
+                                                             "-std=gnu11;-D_GNU_SOURCE")
 endif()
 
 if(IAXL_USE_SYSTEM_QAT)
@@ -176,7 +181,7 @@ if(DEVICE STREQUAL "cuda")
 elseif(DEVICE STREQUAL "xpu")
     target_compile_definitions(torch_ext PRIVATE XPU_SUPPORT=1)
 else()
-    target_compile_definitions(torch_ext PRIVATE CPU_SUPPORT=1)
+    target_compile_definitions(torch_ext PRIVATE CPU_SUPPORT=1 DSA_MEMCPY_SUPPORT=1)
 endif()
 
 if(ENABLE_TORCH_PROFILER)

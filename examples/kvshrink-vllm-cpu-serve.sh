@@ -38,8 +38,8 @@ export IAXL_KV_COMPRESSION="${IAXL_KV_COMPRESSION:-1}"
 export IAXL_QAT_ZIP_ENABLE="${IAXL_QAT_ZIP_ENABLE:-1}"
 export IAXL_CPU_ZIP_ENABLE="${IAXL_CPU_ZIP_ENABLE:-0}"
 export IAXL_IAA_ZIP_ENABLE="${IAXL_IAA_ZIP_ENABLE:-0}"
-# bf16 byte-plane transform. Off (default): 19% of KV bytes saved.
-# On: 28% saved, at the cost of a CPU byte-plane pass over every block.
+# bf16 byte-plane transform. Off (default): restore matches raw+DSA, 19% of KV bytes saved.
+# On: 28% saved, but the CPU unshuffle costs up to ~17% throughput on long fully-cached prompts.
 export IAXL_KV_DATA_SHUFFLE="${IAXL_KV_DATA_SHUFFLE:-0}"
 export IAXL_KV_LOSSY_TRUNC="${IAXL_KV_LOSSY_TRUNC:-0}"
 export IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS="${IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS:-0}"
@@ -59,6 +59,19 @@ export IAXL_QAT_POLL_THREADS="${IAXL_QAT_POLL_THREADS:-$IAXL_CORES}"
 export IAXL_IAA_INSTANCE_NUM="${IAXL_IAA_INSTANCE_NUM:-4}"
 export IAXL_IAA_POLL_THREADS="${IAXL_IAA_POLL_THREADS:-1}"
 
+# --- DSA ------------------------------------------------------------------------------------
+# Host-to-host DSA for bulk block copies (raw path: +18-62% restore throughput) and for the QAT
+# per-block staging/scatter copies, which run asynchronously next to the codec. Raw batches under
+# IAXL_DSA_MEMCPY_MIN_BYTES stay on memcpy.
+export IAXL_DSA_GD_ENABLE=0
+export IAXL_DSA_WQS="${IAXL_DSA_WQS:-wq0.0}"
+if [[ -z "${IAXL_DSA_MEMCPY_ENABLE:-}" ]]; then
+    IAXL_DSA_MEMCPY_ENABLE=0
+    [[ -e "/dev/dsa/${IAXL_DSA_WQS%%,*}" ]] && IAXL_DSA_MEMCPY_ENABLE=1
+fi
+export IAXL_DSA_MEMCPY_ENABLE
+export IAXL_DSA_MEMCPY_MIN_BYTES="${IAXL_DSA_MEMCPY_MIN_BYTES:-1048576}"
+
 # --- Cache ----------------------------------------------------------------------------------
 export IAXL_DDR_POOL_SIZE_GB="${IAXL_DDR_POOL_SIZE_GB:-4}"
 export PYTHONOPTIMIZE=0
@@ -69,7 +82,7 @@ export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS:
 export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC:-0}"
 export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC_MAP="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC_MAP:-0-:0}"
 
-echo "[launch] inference: OMP_NUM_THREADS=$OMP_NUM_THREADS bind=$VLLM_CPU_OMP_THREADS_BIND | iaxl: affinity=$IAXL_CPU_AFFINITY qat_devices=$IAXL_QAT_DEVICES shuffle=$IAXL_KV_DATA_SHUFFLE" >&2
+echo "[launch] inference: OMP_NUM_THREADS=$OMP_NUM_THREADS bind=$VLLM_CPU_OMP_THREADS_BIND | iaxl: affinity=$IAXL_CPU_AFFINITY qat_devices=$IAXL_QAT_DEVICES dsa=$IAXL_DSA_MEMCPY_ENABLE shuffle=$IAXL_KV_DATA_SHUFFLE" >&2
 
 python - <<'PY'
 from iaxl import torch_ext
