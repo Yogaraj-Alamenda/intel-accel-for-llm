@@ -155,6 +155,12 @@ class CPUInferenceTests(unittest.TestCase):
             self.assertEqual(masks[name], [pinned], f"{name} thread not pinned: {masks}")
         self.assertNotEqual(masks["python"], [pinned], "the Python threads must keep their mask")
 
+    @unittest.skipUnless(ZIP_BACKEND == "qat", "requires QAT hardware")
+    def test_qat_single_poller_drives_all_instances(self):
+        _, output = self._run_native_probe(IAXL_QAT_POLL_THREADS="1")
+        self.assertIn("qat_instances=2 qat_pollers=1", output)
+        self.assertIn("omp_threads=1", output)
+
     SHUFFLE_PERSIST_PROBE = textwrap.dedent(
         """
         import sys

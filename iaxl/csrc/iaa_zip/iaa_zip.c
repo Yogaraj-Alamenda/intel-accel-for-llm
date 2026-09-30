@@ -370,6 +370,13 @@ int iaa_zip_compress_staged(int slot, int len) {
     return submit_slot(slot, 1, iaa_zip_input_buf(slot), len);
 }
 
+int iaa_zip_poll(int slot) {
+    IaaSlot *sl = resolve_slot(slot);
+    if (!sl || !sl->submitted)
+        return -1;
+    return qpl_check_job(sl->job) == QPL_STS_BEING_PROCESSED ? 0 : 1;
+}
+
 int iaa_zip_wait(int slot, void **dest, int *len) {
     IaaSlot *sl = resolve_slot(slot);
     if (!sl || !sl->submitted)

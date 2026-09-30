@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // QAT, IAA and CPU workers share one task pool. Each worker claims another item when a request
-// completes, so the faster backend naturally processes more of the batch. QAT and IAA workers keep
-// multiple asynchronous requests in flight, while CPU workers run one synchronous raw-DEFLATE
-// request each.
+// completes, so the faster backend naturally processes more of the batch. QAT and IAA pollers keep
+// multiple asynchronous requests in flight across one or more instances each, while CPU workers
+// run one synchronous raw-DEFLATE request each.
 //
 // Blocks are addressed as ChunkViews: strided slices of the inference tensor (or whole scratch
 // tensors). PUT gathers a view straight into the codec's staging buffer and GET scatters the
@@ -17,6 +17,8 @@
 #include <torch/extension.h>
 
 #include <omp.h>
+#include <sched.h>
+#include <immintrin.h>
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -37,6 +39,7 @@
 #include "kv_zip.h"
 
 #define OMP_SCHEDULE dynamic
+#define POLL_SPIN_LIMIT 512
 
 // Header word 0 is the payload length with two flag bits: IAA produced the stream (it cannot be
 // decoded by QAT/CPU), and the block was byte-plane shuffled before compression. GET must obey
@@ -54,17 +57,18 @@ struct ZipOps {
     int (*decompress)(int slot, void *src, int len);
     void *(*input_buf)(int slot);
     int (*compress_staged)(int slot, int len);
+    int (*poll)(int slot);
     int (*wait)(int slot, void **dest, int *len);
     int (*src_cap)(void);
     int (*queue_depth)(void);
 };
 
 static const ZipOps kZipOps[] = {
-    {qat_zip_decompress, qat_zip_input_buf, qat_zip_compress_staged, qat_zip_wait,
+    {qat_zip_decompress, qat_zip_input_buf, qat_zip_compress_staged, qat_zip_poll, qat_zip_wait,
      qat_zip_src_cap, qat_zip_queue_depth},
-    {iaa_zip_decompress, iaa_zip_input_buf, iaa_zip_compress_staged, iaa_zip_wait,
+    {iaa_zip_decompress, iaa_zip_input_buf, iaa_zip_compress_staged, iaa_zip_poll, iaa_zip_wait,
      iaa_zip_src_cap, iaa_zip_queue_depth},
-    {cpu_zip_decompress, cpu_zip_input_buf, cpu_zip_compress_staged, cpu_zip_wait,
+    {cpu_zip_decompress, cpu_zip_input_buf, cpu_zip_compress_staged, cpu_zip_poll, cpu_zip_wait,
      cpu_zip_src_cap, cpu_zip_queue_depth},
 };
 
@@ -191,13 +195,17 @@ static void shuffle_xfer(const ChunkView &view, char *flat, bool to_view) {
 template <class Next, class Submit, class Complete>
 static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) {
     ensure_zip_init();
-    const int qat_workers = envs.IAXL_QAT_ZIP_ENABLE ? envs.IAXL_QAT_INSTANCE_NUM : 0;
-    const int iaa_workers = envs.IAXL_IAA_ZIP_ENABLE ? envs.IAXL_IAA_INSTANCE_NUM : 0;
+    const int qat_instances = envs.IAXL_QAT_ZIP_ENABLE ? envs.IAXL_QAT_INSTANCE_NUM : 0;
+    const int iaa_instances = envs.IAXL_IAA_ZIP_ENABLE ? envs.IAXL_IAA_INSTANCE_NUM : 0;
+    const int qat_pollers = envs.IAXL_QAT_ZIP_ENABLE ? envs.IAXL_QAT_POLL_THREADS : 0;
+    const int iaa_pollers = envs.IAXL_IAA_ZIP_ENABLE ? envs.IAXL_IAA_POLL_THREADS : 0;
     const int cpu_workers = envs.IAXL_CPU_ZIP_ENABLE ? cpu_zip_num_slots() : 0;
-    const int worker_count = qat_workers + iaa_workers + cpu_workers;
-    IAXL_CHECK(qat_workers == 0 || qat_workers <= qat_zip_num_slots() / qat_zip_queue_depth(),
+    const int worker_count = qat_pollers + iaa_pollers + cpu_workers;
+    IAXL_CHECK(qat_instances == 0 ||
+                   qat_instances <= qat_zip_num_slots() / qat_zip_queue_depth(),
                "kv_zip: IAXL_QAT_INSTANCE_NUM exceeds available QAT instances");
-    IAXL_CHECK(iaa_workers == 0 || iaa_workers <= iaa_zip_num_slots() / iaa_zip_queue_depth(),
+    IAXL_CHECK(iaa_instances == 0 ||
+                   iaa_instances <= iaa_zip_num_slots() / iaa_zip_queue_depth(),
                "kv_zip: IAXL_IAA_INSTANCE_NUM exceeds available IAA instances");
     IAXL_CHECK(worker_count == envs.IAXL_OMP_THREAD_NUM,
                "kv_zip: compression workers do not match the configured OpenMP team");
@@ -206,48 +214,75 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
     {
         pin_codec_thread();
         const int t = omp_get_thread_num();
-        ZipBackend backend = ZipBackend::CPU;
-        int first = qat_workers + iaa_workers;
-        if (t < qat_workers) {
-            backend = ZipBackend::QAT;
-            first = 0;
-        } else if (t < qat_workers + iaa_workers) {
-            backend = ZipBackend::IAA;
-            first = qat_workers;
-        }
-        const int depth = ops(backend).queue_depth();
-        const int base = (t - first) * depth;
         IAXL_CHECK(omp_get_num_threads() == worker_count,
                    "kv_zip: OpenMP did not create the configured worker team");
 
-        int active_depth = 0;
-        std::vector<size_t> slot_item(static_cast<size_t>(depth));
-        for (int k = 0; k < depth; k++) {
-            const size_t i = get_next(backend);
-            if (i == kNoTask)
-                break;
-            submit(backend, base + k, i);
-            slot_item[k] = i;
-            active_depth++;
+        // Poller p of P drives instances p, p+P, p+2P, ... and every queue slot of each.
+        ZipBackend backend;
+        std::vector<int> slots;
+        if (t < qat_pollers) {
+            backend = ZipBackend::QAT;
+            const int depth = qat_zip_queue_depth();
+            for (int i = t; i < qat_instances; i += qat_pollers)
+                for (int k = 0; k < depth; k++)
+                    slots.push_back(i * depth + k);
+        } else if (t < qat_pollers + iaa_pollers) {
+            backend = ZipBackend::IAA;
+            const int depth = iaa_zip_queue_depth();
+            for (int i = t - qat_pollers; i < iaa_instances; i += iaa_pollers)
+                for (int k = 0; k < depth; k++)
+                    slots.push_back(i * depth + k);
+        } else {
+            backend = ZipBackend::CPU;
+            slots.push_back(t - qat_pollers - iaa_pollers);
         }
 
-        int in_flight = active_depth;
+        std::vector<size_t> slot_item(slots.size(), kNoTask);
         bool draining = false;
-        for (int s = 0; in_flight > 0; s = (s + 1) % active_depth) {
-            void *out;
-            int out_len;
-            const int status = ops(backend).wait(base + s, &out, &out_len);
-            IAXL_CHECK(status == 0, "kv_zip: zip wait failed");
-            complete(backend, slot_item[s], out, out_len);
 
+        auto claim = [&](size_t s) {
             const size_t i = draining ? kNoTask : get_next(backend);
-            if (i != kNoTask) {
-                submit(backend, base + s, i);
-                slot_item[s] = i;
-            } else {
+            if (i == kNoTask) {
                 draining = true;
-                in_flight--;
+                slot_item[s] = kNoTask;
+                return false;
             }
+            slot_item[s] = i;
+            submit(backend, slots[s], i);
+            return true;
+        };
+
+        int in_flight = 0;
+        for (size_t s = 0; s < slots.size() && claim(s); s++)
+            in_flight++;
+
+        // Completes and refills whichever slot finished first instead of waiting in order.
+        int idle_spins = 0;
+        while (in_flight > 0) {
+            bool progressed = false;
+            for (size_t s = 0; s < slots.size(); s++) {
+                if (slot_item[s] == kNoTask)
+                    continue;
+                const int state = ops(backend).poll(slots[s]);
+                IAXL_CHECK(state >= 0, "kv_zip: zip poll failed");
+                if (state == 0)
+                    continue;
+                void *out;
+                int out_len;
+                IAXL_CHECK(ops(backend).wait(slots[s], &out, &out_len) == 0,
+                           "kv_zip: zip wait failed");
+                complete(backend, slot_item[s], out, out_len);
+                if (!claim(s))
+                    in_flight--;
+                progressed = true;
+            }
+            // Nothing moved in a full pass: the devices are busy, so give the core away.
+            if (progressed)
+                idle_spins = 0;
+            else if (idle_spins++ < POLL_SPIN_LIMIT)
+                _mm_pause();
+            else
+                sched_yield();
         }
     }
 }

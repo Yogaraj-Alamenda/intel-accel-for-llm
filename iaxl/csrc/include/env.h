@@ -58,6 +58,9 @@ struct Envs {
     int IAXL_IAA_ZIP_INSTANCES_PER_DEVICE;
     int IAXL_IAA_ZIP_QUEUE_DEPTH;
     int IAXL_CPU_ZIP_THREADS;
+    // Threads that drive QAT/IAA instances; each poller multiplexes instances/pollers devices.
+    int IAXL_QAT_POLL_THREADS;
+    int IAXL_IAA_POLL_THREADS;
     int IAXL_OMP_THREAD_NUM;
 
     bool IAXL_KV_COMPRESSION;

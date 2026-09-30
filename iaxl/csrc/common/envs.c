@@ -103,6 +103,14 @@ int iaxl_apply_thread_affinity(void) {
     return count;
 }
 
+// Pollers default to one per instance (the historical layout) and never exceed the instances.
+static int poll_threads(const char *name, int instances) {
+    if (instances <= 0)
+        return 0;
+    int pollers = env_int(name, instances);
+    return pollers > instances ? instances : pollers;
+}
+
 __attribute__((constructor(101))) void envs_init(void) {
 
     envs.IAXL_ZIP_SRC_CAP = env_int("IAXL_ZIP_SRC_CAP", 256 * 1024);
@@ -125,7 +133,9 @@ __attribute__((constructor(101))) void envs_init(void) {
         envs.IAXL_IAA_INSTANCE_NUM = 0;
     if (!envs.IAXL_CPU_ZIP_ENABLE)
         envs.IAXL_CPU_ZIP_THREADS = 0;
-    const int zip_workers = envs.IAXL_QAT_INSTANCE_NUM + envs.IAXL_IAA_INSTANCE_NUM +
+    envs.IAXL_QAT_POLL_THREADS = poll_threads("IAXL_QAT_POLL_THREADS", envs.IAXL_QAT_INSTANCE_NUM);
+    envs.IAXL_IAA_POLL_THREADS = poll_threads("IAXL_IAA_POLL_THREADS", envs.IAXL_IAA_INSTANCE_NUM);
+    const int zip_workers = envs.IAXL_QAT_POLL_THREADS + envs.IAXL_IAA_POLL_THREADS +
                             envs.IAXL_CPU_ZIP_THREADS;
 #ifdef CPU_SUPPORT
     envs.IAXL_OMP_THREAD_NUM = zip_workers > 0 ? zip_workers : 1;
@@ -181,7 +191,7 @@ __attribute__((constructor(101))) void envs_init(void) {
 #endif
 
          printf("[iaxl] config: qat_zip=%s iaa_zip=%s cpu_zip=%s qat_instances=%d "
-             "iaa_instances=%d cpu_zip_threads=%d "
+             "qat_pollers=%d iaa_instances=%d iaa_pollers=%d cpu_zip_threads=%d "
              "omp_threads=%d cpus=%d affinity=%s "
                "compression=%s data_shuffle=%s lossy_trunc=%d dsa_gd=%s "
                "dsa_gd_reset=%s "
@@ -189,7 +199,7 @@ __attribute__((constructor(101))) void envs_init(void) {
                envs.IAXL_QAT_ZIP_ENABLE ? "ON" : "OFF",
                envs.IAXL_IAA_ZIP_ENABLE ? "ON" : "OFF",
                envs.IAXL_CPU_ZIP_ENABLE ? "ON" : "OFF", envs.IAXL_QAT_INSTANCE_NUM,
-               envs.IAXL_IAA_INSTANCE_NUM,
+               envs.IAXL_QAT_POLL_THREADS, envs.IAXL_IAA_INSTANCE_NUM, envs.IAXL_IAA_POLL_THREADS,
                envs.IAXL_CPU_ZIP_THREADS,
                envs.IAXL_OMP_THREAD_NUM, cpus, *envs.IAXL_CPU_AFFINITY ? envs.IAXL_CPU_AFFINITY : "inherit",
                envs.IAXL_KV_COMPRESSION ? "ON" : "OFF",

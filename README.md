@@ -138,7 +138,7 @@ MODEL=Qwen/Qwen3-0.6B taskset -c 0-31 ./examples/kvshrink-vllm-cpu-serve.sh
 The launcher gives inference every CPU it may run on except the last `IAXL_CORES`
 (default 2), which it gives to IAXL; set `VLLM_CPU_OMP_THREADS_BIND`,
 `IAXL_CPU_AFFINITY` and `OMP_NUM_THREADS` together to place them yourself. It uses
-QAT-only compression, BF16, one worker, block size 32, and port
+every QAT device, QAT-only compression, BF16, one worker, block size 32, and port
 8000; `KVSHRINK_CONNECTOR=0` serves plain vLLM with its own prefix cache instead.
 `VLLM_CPU_KVCACHE_SPACE` controls the live CPU KV cache size in GiB;
 `IAXL_DDR_POOL_SIZE_GB` independently controls the compressed cache. CPU persisted
@@ -156,10 +156,12 @@ the two are partitioned explicitly:
   when more than one codec thread would share the rank's inference CPUs (unset or
   overlapping), and warns for a single thread. For multiple ranks, set `TP_SIZE`,
   per-rank inference affinity, and `KVSHRINK_QAT_DEVICES` (for example, `0|1`).
-- Each QAT/IAA instance is driven by its own codec thread, so the launcher uses one
-  QAT instance per IAXL core. QAT and IAA waits spin briefly with `pause` and then
-  yield the core.
-- The compression OpenMP team is sized from the instance counts and
+- `IAXL_QAT_POLL_THREADS` / `IAXL_IAA_POLL_THREADS` decouple accelerator concurrency
+  from CPU threads: poller *p* of *P* drives instances *p, p+P, …* and their queue
+  slots. The launcher dedicates `IAXL_CORES` (default 2) cores to IAXL, runs one QAT
+  poller per core, and uses four instances on every QAT device, since each device
+  decompresses about 6 GB/s. Pollers spin briefly with `pause` and then yield the core.
+- The compression OpenMP team is sized from the poller counts and
   `IAXL_CPU_ZIP_THREADS`, independently of inference's `OMP_NUM_THREADS`.
 
 A CPU attention block has `2 * num_kv_heads * block_size * head_size * dtype_bytes`
@@ -176,7 +178,7 @@ IAXL_TEST_ZIP_BACKEND=qat \
 
 The tests cover block layouts, FP32/FP16/BF16, raw and mixed-layer compression,
 asynchronous waits, the direct (scratch-free) codec path, native-thread affinity,
-and persisted reloads. An opt-in inference
+QAT poller consolidation, and persisted reloads. An opt-in inference
 smoke test uses a cached `Qwen/Qwen3-0.6B` snapshot (or `IAXL_TEST_MODEL`, a local
 model path or cached model ID), disables vLLM prefix caching, and requires actual
 external-cache hits and identical cold/warm generated token IDs:

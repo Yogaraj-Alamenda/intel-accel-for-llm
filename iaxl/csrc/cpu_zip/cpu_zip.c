@@ -139,6 +139,12 @@ int cpu_zip_compress_staged(int slot, int len) {
     return cpu_zip_compress(slot, cpu_zip_input_buf(slot), len);
 }
 
+int cpu_zip_poll(int slot) {
+    if (!g_slots || slot < 0 || slot >= g_slot_count || !g_slots[slot].ready)
+        return -1;
+    return 1;
+}
+
 void cpu_zip_shutdown(void) {
     if (g_slots) {
         for (int slot = 0; slot < g_slot_count; slot++) {

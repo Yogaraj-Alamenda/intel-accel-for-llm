@@ -82,9 +82,15 @@ gather/scatter between the KV tensor and the cache payload.
 disjoint from `VLLM_CPU_OMP_THREADS_BIND`; the connector refuses more than one codec
 thread on inference CPUs and warns for one. Without this the codec pollers preempt
 inference OpenMP threads and the cost surfaces as libgomp barrier spin, not as codec
-time. The codec team is sized from the QAT/IAA instance counts and CPU zip threads,
-not from inference's `OMP_NUM_THREADS`, and QAT/IAA waits spin on `pause` for a
-bounded count, then `sched_yield`.
+time.
+
+**Consolidated pollers.** `IAXL_QAT_POLL_THREADS` / `IAXL_IAA_POLL_THREADS` size the
+codec team independently of the instance count: poller *p* of *P* drives instances
+*p, p+P, …* and all their queue slots through a non-blocking `poll` per slot,
+completing and refilling whichever slot finished first. A poller that completes
+nothing in a full pass spins on `pause` for a bounded count, then `sched_yield`s.
+One poller can therefore keep several QAT instances saturated from a single core.
+IAA's wait loop uses the same bounded-spin policy as QAT.
 
 The CPU connector derives the block axis from the attention layout (`[2, blocks,
 heads, tokens, head_size]` with block dimension 1, or the HND `[blocks, heads,

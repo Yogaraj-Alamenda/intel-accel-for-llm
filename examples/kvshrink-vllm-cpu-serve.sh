@@ -10,6 +10,7 @@ export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE:-4}"
 # Measured: the codec thread must not share a core with inference (a floating poller loses
 # 13-21% restore throughput; two pollers on inference cores halve throughput and triple TPOT).
 # Default: inference on every visible CPU but the last IAXL_CORES; IAXL pinned to those.
+# Two cores: restore throughput scales with pollers (standalone, 4 QAT devices, DSA on).
 IAXL_CORES="${IAXL_CORES:-2}"
 if [[ -z "${VLLM_CPU_OMP_THREADS_BIND:-}" || -z "${IAXL_CPU_AFFINITY:-}" ]]; then
     mapfile -t CPUS < <(python3 -c 'import os; print(*sorted(os.sched_getaffinity(0)), sep="\n")')
@@ -43,9 +44,20 @@ export IAXL_KV_DATA_SHUFFLE="${IAXL_KV_DATA_SHUFFLE:-0}"
 export IAXL_KV_LOSSY_TRUNC="${IAXL_KV_LOSSY_TRUNC:-0}"
 export IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS="${IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS:-0}"
 
-# Each QAT/IAA instance runs its own codec thread, so one instance per dedicated IAXL core.
-export IAXL_QAT_INSTANCE_NUM="${IAXL_QAT_INSTANCE_NUM:-$IAXL_CORES}"
-export IAXL_IAA_INSTANCE_NUM="${IAXL_IAA_INSTANCE_NUM:-1}"
+# Spread instances over every QAT device: each decompresses ~6 GB/s, so restore scales with devices.
+QAT_DEVICE_COUNT=0
+for dev in /sys/bus/pci/drivers/{4xxx,420xx}/0000:*; do
+    [[ -e "$dev" ]] && QAT_DEVICE_COUNT=$(( QAT_DEVICE_COUNT + 1 ))
+done
+(( QAT_DEVICE_COUNT > 0 )) || QAT_DEVICE_COUNT=1
+export IAXL_QAT_ZIP_INSTANCES_PER_DEVICE="${IAXL_QAT_ZIP_INSTANCES_PER_DEVICE:-4}"
+export IAXL_QAT_INSTANCE_NUM="${IAXL_QAT_INSTANCE_NUM:-$(( QAT_DEVICE_COUNT * IAXL_QAT_ZIP_INSTANCES_PER_DEVICE ))}"
+# qat_zip takes at most INSTANCES_PER_DEVICE from each listed device.
+export IAXL_QAT_DEVICES="${IAXL_QAT_DEVICES:-$(seq -s, 0 $(( (IAXL_QAT_INSTANCE_NUM + IAXL_QAT_ZIP_INSTANCES_PER_DEVICE - 1) / IAXL_QAT_ZIP_INSTANCES_PER_DEVICE - 1 )))}"
+# One poller per dedicated IAXL core; poller p drives instances p, p+P, ... (one per device).
+export IAXL_QAT_POLL_THREADS="${IAXL_QAT_POLL_THREADS:-$IAXL_CORES}"
+export IAXL_IAA_INSTANCE_NUM="${IAXL_IAA_INSTANCE_NUM:-4}"
+export IAXL_IAA_POLL_THREADS="${IAXL_IAA_POLL_THREADS:-1}"
 
 # --- Cache ----------------------------------------------------------------------------------
 export IAXL_DDR_POOL_SIZE_GB="${IAXL_DDR_POOL_SIZE_GB:-4}"
@@ -57,7 +69,7 @@ export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS:
 export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC:-0}"
 export KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC_MAP="${KVSHRINK_VLLM_KV_ASYNC_LOAD_LAYERS_DYNAMIC_MAP:-0-:0}"
 
-echo "[launch] inference: OMP_NUM_THREADS=$OMP_NUM_THREADS bind=$VLLM_CPU_OMP_THREADS_BIND | iaxl: affinity=$IAXL_CPU_AFFINITY qat_devices=${IAXL_QAT_DEVICES:-0} shuffle=$IAXL_KV_DATA_SHUFFLE" >&2
+echo "[launch] inference: OMP_NUM_THREADS=$OMP_NUM_THREADS bind=$VLLM_CPU_OMP_THREADS_BIND | iaxl: affinity=$IAXL_CPU_AFFINITY qat_devices=$IAXL_QAT_DEVICES shuffle=$IAXL_KV_DATA_SHUFFLE" >&2
 
 python - <<'PY'
 from iaxl import torch_ext

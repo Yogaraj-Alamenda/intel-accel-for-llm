@@ -355,6 +355,12 @@ int qat_zip_compress_staged(int slot, int len) {
     return submit_slot(slot, 1, qat_zip_input_buf(slot), len);
 }
 
+int qat_zip_poll(int slot) {
+    if (slot < 0 || slot >= g_inst_count * g_queue_depth)
+        return -1;
+    return poll_op(&g_inst[slot / g_queue_depth], slot % g_queue_depth);
+}
+
 int qat_zip_wait(int slot, void **dest, int *len) {
     if (slot < 0 || slot >= g_inst_count * g_queue_depth)
         return -1;

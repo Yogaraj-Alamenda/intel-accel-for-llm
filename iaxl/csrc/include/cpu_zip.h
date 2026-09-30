@@ -27,6 +27,9 @@ int cpu_zip_decompress(int slot, void *src, int len);
 void *cpu_zip_input_buf(int slot);
 int cpu_zip_compress_staged(int slot, int len);
 
+// Synchronous backend: 1 once a result is ready, -1 for an invalid or idle slot.
+int cpu_zip_poll(int slot);
+
 int cpu_zip_wait(int slot, void **dest, int *len);
 
 void cpu_zip_shutdown(void);

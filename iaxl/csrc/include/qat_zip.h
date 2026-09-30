@@ -25,6 +25,9 @@ int qat_zip_decompress(int slot, void *src, int len);
 void *qat_zip_input_buf(int slot);
 int qat_zip_compress_staged(int slot, int len);
 
+// Non-blocking completion check: 1 done, 0 in flight, -1 invalid slot.
+int qat_zip_poll(int slot);
+
 int qat_zip_wait(int slot, void **dest, int *len);
 
 void qat_zip_shutdown(void);
