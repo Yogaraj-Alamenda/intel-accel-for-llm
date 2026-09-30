@@ -131,9 +131,10 @@ When vLLM runs inference on the CPU, the goal is to keep the inference cores for
 Example with two ranks:
 
 ```bash
+export DEVICE=cpu
 export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"      # inference
 export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # iaxl
-export IAXL_USE_OMP=0 IAXL_CPU_ZIP_ENABLE=0 IAXL_OMP_THREAD_NUM=2
+export IAXL_CPU_ZIP_ENABLE=0 IAXL_OMP_THREAD_NUM=2   # DEVICE=cpu defaults IAXL_USE_OMP to 0
 source setvars.sh
 ```
 
@@ -147,7 +148,7 @@ vLLM's CPU backend also recommends preloading libiomp5 and libtcmalloc through `
 | `IAXL_QAT_INSTANCE_NUM`, `IAXL_IAA_INSTANCE_NUM`, `IAXL_CPU_ZIP_THREADS` | Number of workers per backend |
 | `IAXL_QAT_ZIP_QUEUE_DEPTH`, `IAXL_IAA_ZIP_QUEUE_DEPTH` | In-flight requests per QAT / IAA worker (≤ 4) |
 | `IAXL_OMP_THREAD_NUM` | Thread count `T`. Defaults to the worker count and must be between 1 and the worker count. With `IAXL_USE_OMP=1`, it is also exported as `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
-| `IAXL_USE_OMP` | `1` for OpenMP, `0` for `ThreadPool` |
+| `IAXL_USE_OMP` | `1` for OpenMP, `0` for `ThreadPool`; `setvars.sh` defaults to `0` with `DEVICE=cpu` |
 | `IAXL_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads in this process |
 | `KVSHRINK_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads for each rank, separated by `\|`. Defaults to `VLLM_CPU_OMP_THREADS_BIND`. |
 

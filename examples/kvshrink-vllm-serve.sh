@@ -12,12 +12,16 @@ if [[ "${DP_SIZE:-1}" -gt 1 ]]; then
     parallel_args+=(--data-parallel-size "$DP_SIZE")
 fi
 
+# vLLM CPU inference sizes its KV cache from VLLM_CPU_KVCACHE_SPACE (GiB) instead.
+device_args=(--gpu-memory-utilization 0.8)
+[[ "$DEVICE" == cpu ]] && device_args=()
+
 vllm serve "$MODEL" \
     --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both"}' \
     --trust-remote-code \
     "${parallel_args[@]}" \
-    --gpu-memory-utilization 0.8 \
-    --max-model-len 32765 \
+    "${device_args[@]}" \
+    --max-model-len "${MAX_MODEL_LEN:-32765}" \
     --block-size "${BLOCK_SIZE:-16}" \
     --port "${PORT:-8000}" \
     --no-enable-prefix-caching \

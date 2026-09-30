@@ -2,9 +2,21 @@
 
 [English](vllm-cpu-inference.en.md)
 
-本文介绍 vLLM 在 CPU 上推理、KVShrink 使用 Intel QAT 或 IAA 压缩 KV cache 时，如何配置线程和 CPU 绑核。容器中需要安装 CPU 版 vLLM（`VLLM_TARGET_DEVICE=cpu`）。设计原理见 [KV Zip 设计](../design/kv-zip.md)。
+本文介绍 vLLM 在 CPU 上推理、KVShrink 使用 Intel QAT 或 IAA 压缩 KV cache 时，如何配置线程和 CPU 绑核。容器中需要安装 CPU 版 vLLM（`VLLM_TARGET_DEVICE=cpu`），并以 `DEVICE=cpu` 构建 IAXL。设计原理见 [KV Zip 设计](../design/kv-zip.md)。
 
-## 1. CPU 绑核
+## 1. 构建
+
+`DEVICE=cpu` 构建与 GPU 推理使用相同的 `KVStore`、压缩编解码和 persist/evict API。它不需要 CUDA、SYCL、GDRCopy 或 NIXL，因此不支持 DSA 传输和 RDMA（`remote_pool`）。`docker/Dockerfile.dev` 会构建 GPU 依赖（UCX、NIXL），因此也可以直接在已安装 CPU 版 vLLM 的环境中构建。除 Python 构建依赖外，还需要 C/C++ 编译器、CMake、NASM（QPL 依赖需要，即使不启用 IAA）、SQLite 和 zlib。
+
+```bash
+python -m pip install -r requirements.txt
+DEVICE=cpu python -m pip install -e . --no-build-isolation                     # out-of-tree QAT 驱动包
+DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation # in-tree 驱动 + 系统 qatlib
+```
+
+out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包。用户态库要与宿主机驱动一致：out-of-tree 运行时需要 `/dev/qat_dev_processes`，qatlib 使用宿主机的 VFIO 配置。
+
+## 2. CPU 绑核
 
 两个变量把每个 rank 的 CPU 分给 vLLM 和 IAXL：
 
@@ -25,20 +37,32 @@
 - 每个物理核只用一个逻辑 CPU，可以用 `lscpu -e=CPU,CORE,NODE` 查看对应关系。
 - 每个 rank 给 IAXL 的 CPU 数量不少于 `IAXL_OMP_THREAD_NUM`。
 
-## 2. 线程配置
+## 3. 线程配置
 
 | 变量 | 推荐值 | 作用 |
 | --- | --- | --- |
-| `IAXL_USE_OMP` | `0` | IAXL 不用 OpenMP，改用自己的线程池，OpenMP 留给 vLLM。此时 `setvars.sh` 会 unset `OMP_NUM_THREADS` 和 `OMP_THREAD_LIMIT`。 |
+| `IAXL_USE_OMP` | `0`（`DEVICE=cpu` 时的默认值） | IAXL 不用 OpenMP，改用自己的线程池，OpenMP 留给 vLLM。此时 `setvars.sh` 会 unset `OMP_NUM_THREADS` 和 `OMP_THREAD_LIMIT`。 |
 | `IAXL_OMP_THREAD_NUM` | `1` 或 `2` | 驱动压缩 worker 的线程数。一个线程就能让多个 QAT/IAA 实例保持忙碌。取值范围是 1 到 worker 数。 |
 | `IAXL_CPU_ZIP_ENABLE` | `0` | 不占用 CPU 核跑 zlib，由 QAT 和 IAA 压缩。 |
 | `IAXL_QAT_ZIP_ENABLE`、`IAXL_IAA_ZIP_ENABLE` | 有哪种加速器就设为 `1` | worker 数为 `IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM`，`setvars.sh` 会打印这两个值。 |
 
-## 3. 示例
+## 4. 缓存配置
+
+`DEVICE=cpu` 时，`examples/kvshrink-vllm-serve.sh` 不传 `--gpu-memory-utilization`。CPU 推理时通常需要调整下列变量：
+
+| 变量 | 作用 |
+| --- | --- |
+| `VLLM_CPU_KVCACHE_SPACE` | vLLM 运行时 KV cache 大小（GiB）。KVShrink 压缩缓存的大小由 `IAXL_DDR_POOL_SIZE_GB` 单独设置。 |
+| `MAX_MODEL_LEN` | `--max-model-len`（默认 `32765`）。CPU KV cache 放不下一个满长度请求时调小。 |
+| `BLOCK_SIZE` | `--block-size`（默认 `16`）。CPU 上每层一个 KV block 为 `2 × num_kv_heads × block_size × head_size × dtype_bytes` 字节，必须不超过 `IAXL_ZIP_SRC_CAP`，压缩后不超过 `IAXL_ZIP_DST_CAP`（默认都是 256 KiB）。 |
+| `IAXL_KV_DATA_SHUFFLE`、`IAXL_KV_LOSSY_TRUNC` | 两者都为 `0` 时，编解码直接从 vLLM 的 KV block 压缩、直接解压到 KV block，没有中转拷贝。`setvars.sh` 默认开启字节重排。任一开启都会改写编解码输入，block 需要先拷贝到 scratch buffer。字节重排能提升压缩率，代价是对每个 block 多做一遍处理。 |
+
+## 5. 示例
 
 下面的例子在两个 NUMA 节点上运行两个 rank：节点 0 是 CPU 0-63，节点 1 是 CPU 64-127，每个物理核一个逻辑 CPU。
 
 ```bash
+export DEVICE=cpu # start.sh 会把它传入容器，容器启动时构建 IAXL
 ./start.sh
 
 # 在 start.sh 打开的容器 shell 中执行
@@ -46,7 +70,6 @@ export TP_SIZE=2
 export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"       # vLLM 推理
 export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # IAXL 线程
 export KVSHRINK_QAT_DEVICES="0,1|2,3"                # 每个 rank 所在 NUMA 节点上的 QAT 设备
-export IAXL_USE_OMP=0
 export IAXL_CPU_ZIP_ENABLE=0
 export IAXL_OMP_THREAD_NUM=2
 
@@ -55,7 +78,7 @@ export IAXL_OMP_THREAD_NUM=2
 
 该脚本会 source `setvars.sh`，并按照 vLLM CPU 后端的推荐预加载 libiomp5 和 libtcmalloc。
 
-## 4. 验证
+## 6. 验证
 
 - **`setvars.sh` 输出**：检查 `VLLM_CPU_OMP_THREADS_BIND`、`KVSHRINK_CPU_OMP_THREADS_BIND`、`IAXL_OMP_THREAD_NUM` 和 `IAXL_USE_OMP=0`。
 - **vLLM 日志**：每个 rank 会打印 `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` 和 `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`。
@@ -70,7 +93,7 @@ export IAXL_OMP_THREAD_NUM=2
   done
   ```
 
-## 5. 常见问题
+## 7. 常见问题
 
 | 报错 | 处理 |
 | --- | --- |
@@ -80,3 +103,4 @@ export IAXL_OMP_THREAD_NUM=2
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | 调小 `IAXL_OMP_THREAD_NUM`，或启用更多 QAT/IAA 实例。 |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | `VLLM_CPU_OMP_THREADS_BIND` 中最小的一项 CPU 太少。调小 `IAXL_RESERVED_CPU_NUM` 或 `IAXL_OMP_THREAD_NUM`。 |
 | vLLM 警告 `LD_PRELOAD` 中没有 libiomp 或 libtcmalloc | 用 `examples/kvshrink-vllm-serve.sh` 启动 vLLM。 |
+| `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | 跨节点 KV cache 复用需要 CUDA 或 XPU 构建。 |

@@ -15,6 +15,8 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
+    m.attr("device_type") = IAXL_DEVICE;
+
     py::enum_<GpuTransferDirection>(m, "GpuTransferDirection")
         .value("H2D", GpuTransferDirection::H2D)
         .value("D2H", GpuTransferDirection::D2H);
@@ -504,6 +506,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         },
         "Read accumulated compression/decompression throughput metrics (GB/s is decimal)");
 
+#ifndef CPU_SUPPORT // RDMA (remote_pool) runs on NIXL, which DEVICE=cpu builds do not link
     m.def("rdma_init", &kv_xfer::rdma_init, py::arg("name"), py::arg("listen_port"),
           py::call_guard<py::gil_scoped_release>());
     m.def("rdma_wait_peer", &kv_xfer::rdma_wait_peer, py::arg("peer"), py::arg("timeout_s") = 60.0,
@@ -538,4 +541,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             out.append(py::make_tuple(peer, py::bytes(msg)));
         return out;
     });
+#endif
 }
