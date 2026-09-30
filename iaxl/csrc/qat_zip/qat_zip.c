@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sched.h>
+#include <immintrin.h>
 
 #include "cpa.h"
 #include "cpa_dc.h"
@@ -26,6 +28,7 @@
 #define DEFAULT_SRC_CAP (256 * 1024)
 #define DEFAULT_DST_CAP (256 * 1024)
 #define DEFAULT_DEVICES "0"
+#define POLL_SPIN_LIMIT 512
 
 static int g_instances_per_device = DEFAULT_INSTANCES_PER_DEVICE;
 static uint32_t g_src_cap = DEFAULT_SRC_CAP;
@@ -105,10 +108,22 @@ static int submit_op(Instance *d, int si, int compress, void *src, uint32_t src_
     return (s == CPA_STATUS_SUCCESS) ? 0 : -1;
 }
 
+static int poll_op(Instance *d, int si) {
+    Slot *sl = &d->slot[si];
+    if (!sl->done)
+        icp_sal_DcPollInstance(d->inst, 0);
+    return sl->done ? 1 : 0;
+}
+
 static int wait_op(Instance *d, int si, uint32_t *produced) {
     Slot *sl = &d->slot[si];
-    while (!sl->done) {
-        icp_sal_DcPollInstance(d->inst, 0);
+    // The accelerator answers by DMA, so release the core instead of spinning on it forever;
+    // an unbounded poll loop steals a core from the inference threads sharing this CPU.
+    for (int spins = 0; !poll_op(d, si); spins++) {
+        if (spins < POLL_SPIN_LIMIT)
+            _mm_pause();
+        else
+            sched_yield();
     }
     if (sl->res.status != CPA_DC_OK)
         return -1;

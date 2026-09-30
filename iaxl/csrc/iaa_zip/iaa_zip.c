@@ -10,11 +10,13 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <immintrin.h>
 
 #include "qpl/qpl.h"
 
@@ -28,6 +30,7 @@
 #define BUSY_RETRY_LIMIT 1000000
 #define PAGE_FAULT_RETRY_LIMIT 8
 #define TOUCH_STRIDE 4096
+#define POLL_SPIN_LIMIT 512
 
 typedef struct {
     qpl_job *job;
@@ -364,8 +367,13 @@ int iaa_zip_wait(int slot, void **dest, int *len) {
 
     qpl_status status;
     for (int attempt = 0;; attempt++) {
-        while ((status = qpl_check_job(sl->job)) == QPL_STS_BEING_PROCESSED)
-            ;
+        // Same policy as qat_zip: the device answers by DMA, so do not pin a core on it.
+        for (int spins = 0; (status = qpl_check_job(sl->job)) == QPL_STS_BEING_PROCESSED; spins++) {
+            if (spins < POLL_SPIN_LIMIT)
+                _mm_pause();
+            else
+                sched_yield();
+        }
         if (!is_page_fault(status) || attempt >= PAGE_FAULT_RETRY_LIMIT)
             break;
         touch_slot_pages(sl);
