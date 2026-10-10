@@ -7,6 +7,7 @@
 ## Design Documentation
 
 - [IAXL Design](doc/design/iaxl.md)
+- [KV Zip Design](doc/design/kv-zip.md)
 - [KVShrink Design](doc/design/kvshrink.md)
 
 ## Host Setup

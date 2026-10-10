@@ -5,6 +5,7 @@
 ## 设计文档
 
 - [IAXL 设计](doc/design/iaxl.md)
+- [KV Zip 设计](doc/design/kv-zip.md)
 - [KVShrink 设计](doc/design/kvshrink.md)
 
 ## 配置宿主机
