@@ -15,6 +15,9 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
+    // Threads polling the zip workers while a batch runs.
+    m.attr("codec_threads") = envs.IAXL_OMP_THREAD_NUM;
+
     py::enum_<GpuTransferDirection>(m, "GpuTransferDirection")
         .value("H2D", GpuTransferDirection::H2D)
         .value("D2H", GpuTransferDirection::D2H);

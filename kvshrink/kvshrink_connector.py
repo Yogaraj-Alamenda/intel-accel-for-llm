@@ -32,9 +32,9 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
-from iaxl import KVStore, generate_block_hashs, setup_root_logger
+from iaxl import KVStore, generate_block_hashs, setup_root_logger, torch_ext
 from iaxl.envs import envs as iaxl_envs
-from iaxl.utils.affinity import bind_cpu_affinity, bind_intel_accel
+from iaxl.utils.affinity import bind_cpu_affinity, bind_intel_accel, parse_cpu_list
 
 from .async_load_config import load_async_load_layer_config_from_env
 
@@ -195,10 +195,38 @@ class KVShrinkConnector(KVConnectorBase_V1):
                 cpus[self.global_rank],
             )
         if self.vllm_device == "cpu":  # vLLM's CPU worker binds itself
+            self._check_iaxl_cpus()
             return
         bind_cpu_affinity(
             self.global_rank, self.global_size, envs.VLLM_CPU_OMP_THREADS_BIND
         )
+
+    def _check_iaxl_cpus(self) -> None:
+        # Measured on CPU inference: two codec threads on the inference cores halve request
+        # throughput and triple decode TPOT; one costs ~15% restore throughput.
+        omp_bind = envs.VLLM_CPU_OMP_THREADS_BIND
+        if not omp_bind or omp_bind in ("all", "auto", "nobind"):
+            return
+        specs = omp_bind.split("|")
+        if len(specs) <= self.global_rank:
+            return
+        inference = parse_cpu_list(specs[self.global_rank])
+        iaxl_spec = os.getenv("IAXL_CPU_OMP_THREADS_BIND", "")
+        # Unbound IAXL threads inherit the worker's mask, which is the inference CPUs.
+        overlap = inference & parse_cpu_list(iaxl_spec) if iaxl_spec else inference
+        if not overlap:
+            return
+        msg = (
+            f"IAXL threads (IAXL_CPU_OMP_THREADS_BIND={iaxl_spec or 'unset'}) share "
+            f"{len(overlap)} of rank {self.global_rank}'s inference CPUs"
+        )
+        if torch_ext.codec_threads > 1:
+            raise ValueError(
+                f"{msg} with {torch_ext.codec_threads} codec threads. Set "
+                "KVSHRINK_CPU_OMP_THREADS_BIND to CPUs outside VLLM_CPU_OMP_THREADS_BIND, "
+                "or IAXL_OMP_THREAD_NUM=1."
+            )
+        logger.warning("%s; set KVSHRINK_CPU_OMP_THREADS_BIND to disjoint CPUs", msg)
 
     def _bind_intel_accel(self) -> None:
         bind_intel_accel(self.global_rank)

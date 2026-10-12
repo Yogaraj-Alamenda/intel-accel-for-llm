@@ -75,6 +75,7 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 | Message | Fix |
 | --- | --- |
 | `KVSHRINK_CPU_OMP_THREADS_BIND has N entries, but rank is R` | Provide one entry per rank (`TP_SIZE × DP_SIZE`). |
+| `IAXL threads (...) share N of rank R's inference CPUs with T codec threads` | IAXL CPUs overlap the rank's `VLLM_CPU_OMP_THREADS_BIND` entry, or are unset and default to it. Give IAXL disjoint CPUs, or set `IAXL_OMP_THREAD_NUM=1` (a single thread only logs a warning). |
 | `invalid IAXL_CPU_OMP_THREADS_BIND` | An entry is not a valid CPU list. |
 | `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | None of the listed CPUs is available to the process, for example because they are outside the container's cpuset. |
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | Lower `IAXL_OMP_THREAD_NUM`, or enable more QAT/IAA instances. |

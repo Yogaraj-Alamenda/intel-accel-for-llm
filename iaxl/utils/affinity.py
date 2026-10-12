@@ -11,6 +11,23 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def parse_cpu_list(spec: str) -> set[int]:
+    """Parses one CPU list such as "0-7,16"."""
+    cpu_ids: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = map(int, part.split("-", maxsplit=1))
+            if start > end:
+                raise ValueError(f"Invalid CPU range: {part}")
+            cpu_ids.update(range(start, end + 1))
+        else:
+            cpu_ids.add(int(part))
+    return cpu_ids
+
+
 def bind_cpu_affinity(rank: int, tp_size: int, spec: Optional[str]) -> None:
     """`spec` is VLLM_CPU_OMP_THREADS_BIND: `|`-separated per-rank CPU lists ("0-7,16")."""
     if not spec or spec in ("all", "auto"):
@@ -23,19 +40,7 @@ def bind_cpu_affinity(rank: int, tp_size: int, spec: Optional[str]) -> None:
             f"but tensor parallel size is {tp_size}"
         )
 
-    cpu_ids: set[int] = set()
-    for part in worker_cpu_specs[rank].split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start, end = map(int, part.split("-", maxsplit=1))
-            if start > end:
-                raise ValueError(f"Invalid CPU range: {part}")
-            cpu_ids.update(range(start, end + 1))
-        else:
-            cpu_ids.add(int(part))
-
+    cpu_ids = parse_cpu_list(worker_cpu_specs[rank])
     if not cpu_ids:
         raise ValueError(f"No CPUs configured for rank {rank}")
     os.sched_setaffinity(0, cpu_ids)

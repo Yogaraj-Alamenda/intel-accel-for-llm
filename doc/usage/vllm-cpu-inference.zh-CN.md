@@ -75,6 +75,7 @@ export IAXL_OMP_THREAD_NUM=2
 | 报错 | 处理 |
 | --- | --- |
 | `KVSHRINK_CPU_OMP_THREADS_BIND has N entries, but rank is R` | 每个 rank 提供一项，共 `TP_SIZE × DP_SIZE` 项。 |
+| `IAXL threads (...) share N of rank R's inference CPUs with T codec threads` | IAXL 的 CPU 与本 rank 的 `VLLM_CPU_OMP_THREADS_BIND` 重叠，或未设置而默认与其相同。给 IAXL 分配不重叠的 CPU，或设置 `IAXL_OMP_THREAD_NUM=1`（单线程时只打印警告）。 |
 | `invalid IAXL_CPU_OMP_THREADS_BIND` | 某一项不是合法的 CPU 列表。 |
 | `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | 列出的 CPU 进程都用不了，例如不在容器的 cpuset 内。 |
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | 调小 `IAXL_OMP_THREAD_NUM`，或启用更多 QAT/IAA 实例。 |

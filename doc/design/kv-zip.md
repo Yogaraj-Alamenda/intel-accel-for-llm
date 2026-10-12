@@ -118,6 +118,8 @@ With `IAXL_USE_OMP=0`, iaxl leaves the OpenMP runtime and the `OMP_*` variables 
 
 Under vLLM, the connector sets this variable for each rank from `KVSHRINK_CPU_OMP_THREADS_BIND`. That variable uses the `|`-separated format of `VLLM_CPU_OMP_THREADS_BIND`, with one entry per global rank, and defaults to it. iaxl can therefore run on different CPUs from vLLM.
 
+When vLLM runs inference on the CPU, the connector refuses to start if more than one codec thread would share the rank's inference CPUs (overlapping lists, or no IAXL list so the threads inherit the inference mask), and logs a warning for a single thread. Two pollers on the inference cores halved request throughput and tripled decode TPOT in measurements.
+
 ## CPU Inference
 
 When vLLM runs inference on the CPU, the goal is to keep the inference cores for vLLM and to compress on QAT and IAA, driven from a few separate cores.
