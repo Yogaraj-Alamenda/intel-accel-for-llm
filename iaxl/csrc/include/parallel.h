@@ -19,6 +19,7 @@
 
 #include "env.h"
 #include "iaxl_common.h"
+#include "task_queue.h"
 
 namespace parallel {
 
@@ -59,6 +60,9 @@ template <class Fn> void run_threads(int n, Fn &&fn) {
         {
             IAXL_CHECK(omp_get_num_threads() == n,
                        "run_threads: OpenMP team is smaller than requested, check OMP_THREAD_LIMIT");
+            // libiomp5 resets the affinity of new root and worker threads.
+            static thread_local const bool bound = (TaskQueue::bind_cpus(), true);
+            (void)bound;
             fn(omp_get_thread_num());
         }
     }

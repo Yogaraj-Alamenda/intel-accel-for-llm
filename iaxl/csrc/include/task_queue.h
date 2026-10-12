@@ -11,6 +11,10 @@
 #include <stdexcept>
 #include <thread>
 #include <pthread.h>
+#include <sched.h>
+
+#include "env.h"
+#include "iaxl_common.h"
 
 class TaskQueue {
   public:
@@ -31,6 +35,7 @@ class TaskQueue {
 
         worker_ = std::thread([this]() {
             pthread_setname_np(pthread_self(), name_);
+            bind_cpus();
             worker_loop();
         });
         state_ = State::RUNNING;
@@ -85,6 +90,32 @@ class TaskQueue {
             state_ = State::STOPPED;
         }
         state_cv_.notify_all();
+    }
+
+    // Pins to IAXL_CPU_OMP_THREADS_BIND ("0-7,16"); threads spawned afterwards inherit it.
+    static void bind_cpus() {
+        const char *spec = env_str("IAXL_CPU_OMP_THREADS_BIND", nullptr);
+        if (!spec)
+            return;
+        cpu_set_t cpus;
+        CPU_ZERO(&cpus);
+        for (const char *p = spec;; ++p) {
+            char *end;
+            long first = strtol(p, &end, 10);
+            long last = first;
+            if (end != p && *end == '-')
+                last = strtol(p = end + 1, &end, 10);
+            IAXL_CHECK(end != p && 0 <= first && first <= last && last < CPU_SETSIZE &&
+                           (*end == ',' || *end == '\0'),
+                       "invalid IAXL_CPU_OMP_THREADS_BIND");
+            for (long cpu = first; cpu <= last; ++cpu)
+                CPU_SET(cpu, &cpus);
+            if (*end == '\0')
+                break;
+            p = end;
+        }
+        IAXL_CHECK(pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus) == 0,
+                   "cannot bind to IAXL_CPU_OMP_THREADS_BIND");
     }
 
   private:

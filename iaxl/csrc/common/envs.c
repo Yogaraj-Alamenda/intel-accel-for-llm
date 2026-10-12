@@ -75,8 +75,8 @@ __attribute__((constructor(101))) void envs_init(void) {
     if (!envs.IAXL_CPU_ZIP_ENABLE)
         envs.IAXL_CPU_ZIP_THREADS = 0;
     envs.IAXL_OMP_THREAD_NUM =
-        env_int("OMP_NUM_THREADS", envs.IAXL_QAT_INSTANCE_NUM + envs.IAXL_IAA_INSTANCE_NUM +
-                                       envs.IAXL_CPU_ZIP_THREADS);
+        env_int("IAXL_OMP_THREAD_NUM", envs.IAXL_QAT_INSTANCE_NUM + envs.IAXL_IAA_INSTANCE_NUM +
+                                           envs.IAXL_CPU_ZIP_THREADS);
     if (envs.IAXL_OMP_THREAD_NUM < 1)
         envs.IAXL_OMP_THREAD_NUM = 1;
     envs.IAXL_USE_OMP = env_bool("IAXL_USE_OMP", 1);
@@ -112,7 +112,7 @@ __attribute__((constructor(101))) void envs_init(void) {
         if (cpus < envs.IAXL_OMP_THREAD_NUM) {
             fprintf(stderr,
                     "[iaxl] WARNING: only %d CPU(s) available to this process, "
-                "but OMP_NUM_THREADS=%d (omp_max_threads=%d); compression "
+                "but IAXL_OMP_THREAD_NUM=%d (omp_max_threads=%d); compression "
                 "workers will be oversubscribed and throughput may degrade.\n",
                 cpus, envs.IAXL_OMP_THREAD_NUM, omp_threads);
         }

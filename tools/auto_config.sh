@@ -505,7 +505,8 @@ validate_omp_config() {
             "($IAXL_RESERVED_CPU_NUM) exceeds the smallest rank CPU allocation ($min_rank_cpu_count)" >&2
         return 1
     fi
-    if [[ "$OMP_NUM_THREADS" != "$IAXL_OMP_THREAD_NUM" ||
+    if env_truthy "$IAXL_USE_OMP" &&
+        [[ "$OMP_NUM_THREADS" != "$IAXL_OMP_THREAD_NUM" ||
         "$OMP_THREAD_LIMIT" != "$IAXL_OMP_THREAD_NUM" ]] ||
         ! [[ "$OMP_MAX_ACTIVE_LEVELS" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: OpenMP environment does not match IAXL_OMP_THREAD_NUM" >&2

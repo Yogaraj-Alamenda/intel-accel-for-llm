@@ -38,6 +38,7 @@ export DP_SIZE="${DP_SIZE:-1}"            # Data-parallel group count
 NUM_WORKERS=$((TP_SIZE * DP_SIZE))
 VLLM_CPU_OMP_THREADS_BIND="${VLLM_CPU_OMP_THREADS_BIND:-$(cpu_auto_detect "$NUM_WORKERS")}" || return 1 2>/dev/null || exit 1
 export VLLM_CPU_OMP_THREADS_BIND # Per-worker CPU affinity (one entry per global rank)
+export KVSHRINK_CPU_OMP_THREADS_BIND="${KVSHRINK_CPU_OMP_THREADS_BIND:-$VLLM_CPU_OMP_THREADS_BIND}" # Per-worker CPUs for iaxl threads (one entry per global rank)
 rank_cpu_counts "$VLLM_CPU_OMP_THREADS_BIND" "$NUM_WORKERS" || return 1 2>/dev/null || exit 1
 case "${IAXL_QAT_ZIP_ENABLE,,}" in
     1|true|yes|on)
@@ -70,6 +71,7 @@ printf '%s\n' \
     "  IAXL_CPU_ZIP_ENABLE=$IAXL_CPU_ZIP_ENABLE" \
     "  IAXL_DSA_GD_ENABLE=$IAXL_DSA_GD_ENABLE" \
     "  VLLM_CPU_OMP_THREADS_BIND=$VLLM_CPU_OMP_THREADS_BIND" \
+    "  KVSHRINK_CPU_OMP_THREADS_BIND=$KVSHRINK_CPU_OMP_THREADS_BIND" \
     "  KVSHRINK_QAT_DEVICES=${KVSHRINK_QAT_DEVICES:-disabled}" \
     "  KVSHRINK_DSA_DEVICES=${KVSHRINK_DSA_DEVICES:-disabled}" \
     "  KVSHRINK_VLLM_KV_ASYNC_LOAD_ENABLED=$KVSHRINK_VLLM_KV_ASYNC_LOAD_ENABLED" \
@@ -133,10 +135,14 @@ else
     fi
     export IAXL_OMP_THREAD_NUM
 fi
-export OMP_NUM_THREADS=$IAXL_OMP_THREAD_NUM
-export OMP_THREAD_LIMIT=$IAXL_OMP_THREAD_NUM
-export OMP_MAX_ACTIVE_LEVELS=2
 export IAXL_USE_OMP=${IAXL_USE_OMP:-1} # parallel.h runs on OpenMP (1) or iaxl's own thread pool (0), which stays off the OpenMP runtime vLLM and torch share
+if env_truthy "$IAXL_USE_OMP"; then
+    export OMP_NUM_THREADS=$IAXL_OMP_THREAD_NUM
+    export OMP_THREAD_LIMIT=$IAXL_OMP_THREAD_NUM
+else
+    unset OMP_NUM_THREADS OMP_THREAD_LIMIT # Leave OpenMP to vLLM (CPU inference pins one thread per core)
+fi
+export OMP_MAX_ACTIVE_LEVELS=2
 validate_omp_config "$MIN_RANK_CPU_COUNT" || return 1 2>/dev/null || exit 1
 
 # ---- Intel DSA (host<->device copy accelerator, CUDA only) ------------------
