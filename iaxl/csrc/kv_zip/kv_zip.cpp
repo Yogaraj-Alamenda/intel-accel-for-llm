@@ -13,6 +13,9 @@
 
 #include <torch/extension.h>
 
+#include <immintrin.h>
+#include <sched.h>
+
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -62,6 +65,9 @@ static const ZipOps &ops(ZipBackend backend) { return kZipOps[static_cast<int>(b
 
 // Returned by get_next once a backend has nothing left to claim.
 static constexpr size_t kNoTask = static_cast<size_t>(-1);
+
+// Empty poll sweeps spent on `pause` before a poller starts yielding its core.
+static constexpr int kPollSpinLimit = 512;
 
 static void ensure_zip_init() {
     static std::once_flag flag;
@@ -118,7 +124,8 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
             }
         }
 
-        while (!lanes.empty()) {
+        for (int idle = 0; !lanes.empty();) {
+            bool progressed = false;
             for (size_t s = 0; s < lanes.size();) {
                 Lane &lane = lanes[s];
                 void *out;
@@ -130,6 +137,7 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
                     continue;
                 }
                 IAXL_CHECK(status == 0, "kv_zip: zip wait failed");
+                progressed = true;
                 complete(lane.backend, lane.item, out, out_len);
 
                 lane.item = get_next(lane.backend);
@@ -141,6 +149,14 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
                 submit(lane.backend, lane.slot, lane.item);
                 s++;
             }
+            // QAT/IAA answer by DMA; a sweep that found nothing should not starve an SMT sibling
+            // or an inference thread sharing the core.
+            if (progressed)
+                idle = 0;
+            else if (idle++ < kPollSpinLimit)
+                _mm_pause();
+            else
+                sched_yield();
         }
     };
 

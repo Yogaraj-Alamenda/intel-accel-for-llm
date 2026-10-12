@@ -56,7 +56,7 @@ Items are claimed as requests complete instead of being split up front, so faste
 
 A QAT or IAA worker keeps up to `queue_depth` (at most 4) requests in flight while its thread polls other slots. One thread can therefore keep several accelerator instances busy, and `T` can be well below the worker count. A CPU worker is different: it runs zlib inside the submit call and holds its thread for the whole request.
 
-Each thread busy-polls for the whole batch, so every thread costs one core while a batch runs. To use the fewest cores:
+Each thread polls for the whole batch, so every thread costs one core while a batch runs. After a sweep that completes nothing, a thread executes `pause`; after 512 such sweeps in a row it calls `sched_yield()` between sweeps, so a long accelerator wait does not starve an SMT sibling or another thread on the same core. To use the fewest cores:
 
 - Disable CPU zip (`IAXL_CPU_ZIP_ENABLE=0`) so that only QAT and IAA compress.
 - Set a small `IAXL_OMP_THREAD_NUM`, such as 1 or 2.
