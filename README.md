@@ -61,20 +61,23 @@ sudo ./tools/install_gdr_driver.sh
 
 ## Environment Variables
 
-Common settings in `setvars.sh`:
+Common settings in `setvars.sh`. Other variables in `setvars.sh` are advanced settings that most users do not need to change.
 
-| Environment variable | Default | Description |
-| --- | --- | --- |
-| `MODEL` | `Qwen/Qwen3-32B` | Hugging Face model ID or local model path |
-| `TP_SIZE` | `2` | Required; number of Tensor Parallel workers. CPU, QAT, and DSA resources are configured based on this value |
-| `IAXL_KV_COMPRESSION` | `1` | Enable DEFLATE compression (`0`/`1`) |
-| `IAXL_QAT_ZIP_ENABLE` | `1` | Enable QAT compression workers (`0`/`1`) |
-| `IAXL_QATLIB` | unset (`oot`) | Optional. QAT user-space library used by the build: `oot` (out-of-tree package built into `_lib`, used when unset) or `intree` (system qatlib for the in-tree driver) |
-| `IAXL_IAA_ZIP_ENABLE` | `0` | Enable Intel IAA compression workers via Intel QPL (`0`/`1`). Can be combined with `IAXL_QAT_ZIP_ENABLE`: IAA decodes at most a 4 KB DEFLATE history window while QAT gen4 always compresses with 32 KB, so each block records whether IAA can decode it and IAA only claims those on the way back |
-| `IAXL_CPU_ZIP_ENABLE` | `1` | Enable CPU compression workers (`0`/`1`) |
-| `IAXL_DSA_GD_ENABLE` | `0` | Enable Intel DSA + GDRCopy transfers (`0`/`1`) |
-| `IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS` | `1` | Do not compress the KV cache for the first N layers |
-| `PYTHONOPTIMIZE` | `0` | Preserve Python `assert` checks |
+| Category | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| Accelerators | `IAXL_QAT_ZIP_ENABLE` | `1` | Enable QAT compression workers (`0`/`1`) |
+| Accelerators | `IAXL_IAA_ZIP_ENABLE` | `0` | Enable Intel IAA compression workers via Intel QPL (`0`/`1`). Can be combined with QAT; each block records whether IAA can decode it |
+| Accelerators | `IAXL_DSA_GD_ENABLE` | `0` | Enable Intel DSA + GDRCopy transfers (`0`/`1`) |
+| Compression | `IAXL_KV_COMPRESSION` | `1` | Enable DEFLATE compression of the KV cache (`0`/`1`) |
+| vLLM | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face model ID or local model path |
+| vLLM | `TP_SIZE` | `2` | Required; number of Tensor Parallel workers. CPU, QAT, and DSA resources are configured based on this value |
+| vLLM | `DP_SIZE` | `1` | Number of Data Parallel groups; total ranks = `TP_SIZE × DP_SIZE` |
+| vLLM | `VLLM_CPU_OMP_THREADS_BIND` | Auto-detected from GPU NUMA topology | CPUs for vLLM, one `\|`-separated CPU list per rank |
+| IAXL | `KVSHRINK_CPU_OMP_THREADS_BIND` | Same as `VLLM_CPU_OMP_THREADS_BIND` | CPUs for IAXL threads, one entry per rank. Set it for CPU inference; see the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md) |
+| IAXL | `IAXL_RDMA_ENABLE` | `0` | Use a remote KVStore daemon over RDMA (`0`/`1`); see [cross-node KV Cache reuse](#cross-node-kv-cache-reuse) |
+| IAXL | `IAXL_RDMA_DAEMON_NIC_IPS` | unset | Daemon RDMA NIC IPs; required when `IAXL_RDMA_ENABLE=1` |
+| IAXL | `IAXL_RDMA_CLIENT_NIC_IPS` | unset | Client RDMA NIC IPs; required on the client when `IAXL_RDMA_ENABLE=1` |
+| IAXL | `IAXL_OMP_THREAD_NUM` | Number of compression workers | Threads driving compression. Fewer threads use fewer CPU cores |
 
 > [!WARNING]
 > Do not enable `IAXL_DSA_GD_ENABLE` on GPUs that do not support P2P DMA. Keep it set to `0`.

@@ -59,20 +59,23 @@ sudo ./tools/install_gdr_driver.sh
 
 ## 环境变量配置
 
-`setvars.sh` 中的常用配置如下：
+`setvars.sh` 中的常用配置如下。`setvars.sh` 中的其它变量属于高级配置，普通用户无需修改。
 
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `MODEL` | `Qwen/Qwen3-32B` | Hugging Face 模型 ID 或本地模型路径 |
-| `TP_SIZE` | `2` | 必须配置；Tensor Parallel worker 数量，CPU、QAT 和 DSA 资源将据此自动配置 |
-| `IAXL_KV_COMPRESSION` | `1` | 启用 DEFLATE 压缩（`0`/`1`） |
-| `IAXL_QAT_ZIP_ENABLE` | `1` | 启用 QAT 压缩 worker（`0`/`1`） |
-| `IAXL_QATLIB` | 未设置（`oot`） | 可选。构建所用的 QAT 用户态库：`oot`（构建到 `_lib` 的 out-of-tree 驱动包，未设置时使用）或 `intree`（in-tree 驱动对应的系统 qatlib） |
-| `IAXL_IAA_ZIP_ENABLE` | `0` | 通过 Intel QPL 启用 Intel IAA 压缩 worker（`0`/`1`）。可与 `IAXL_QAT_ZIP_ENABLE` 同时开启：IAA 最多只能解码 4 KB 的 DEFLATE 历史窗口，而 QAT gen4 固定使用 32 KB，因此每个数据块都会记录 IAA 能否解码，解压时 IAA 只领取这些块 |
-| `IAXL_CPU_ZIP_ENABLE` | `1` | 启用 CPU 压缩 worker（`0`/`1`） |
-| `IAXL_DSA_GD_ENABLE` | `0` | 启用 Intel DSA + GDRCopy 传输（`0`/`1`） |
-| `IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS` | `1` | 前 N 层 KV cache 不进行压缩 |
-| `PYTHONOPTIMIZE` | `0` | 保留 Python `assert` 检查 |
+| 类别 | 环境变量 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 加速器 | `IAXL_QAT_ZIP_ENABLE` | `1` | 启用 QAT 压缩 worker（`0`/`1`） |
+| 加速器 | `IAXL_IAA_ZIP_ENABLE` | `0` | 通过 Intel QPL 启用 Intel IAA 压缩 worker（`0`/`1`）。可与 QAT 同时开启，每个数据块会记录 IAA 能否解码 |
+| 加速器 | `IAXL_DSA_GD_ENABLE` | `0` | 启用 Intel DSA + GDRCopy 传输（`0`/`1`） |
+| 压缩 | `IAXL_KV_COMPRESSION` | `1` | 对 KV cache 启用 DEFLATE 压缩（`0`/`1`） |
+| vLLM | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face 模型 ID 或本地模型路径 |
+| vLLM | `TP_SIZE` | `2` | 必须配置；Tensor Parallel worker 数量，CPU、QAT 和 DSA 资源将据此自动配置 |
+| vLLM | `DP_SIZE` | `1` | Data Parallel 组数；rank 总数 = `TP_SIZE × DP_SIZE` |
+| vLLM | `VLLM_CPU_OMP_THREADS_BIND` | 根据 GPU 的 NUMA 拓扑自动配置 | vLLM 使用的 CPU，每个 rank 一个 CPU 列表，用 `\|` 分隔 |
+| IAXL | `KVSHRINK_CPU_OMP_THREADS_BIND` | 与 `VLLM_CPU_OMP_THREADS_BIND` 相同 | IAXL 线程使用的 CPU，每个 rank 一项。用 CPU 做推理时需要配置，见 [vLLM CPU 推理使用指南](doc/usage/vllm-cpu-inference.zh-CN.md) |
+| IAXL | `IAXL_RDMA_ENABLE` | `0` | 通过 RDMA 使用远端 KVStore daemon（`0`/`1`），见[跨节点 KV Cache 复用](#跨节点-kv-cache-复用) |
+| IAXL | `IAXL_RDMA_DAEMON_NIC_IPS` | 未设置 | daemon 的 RDMA 网卡 IP；`IAXL_RDMA_ENABLE=1` 时必须配置 |
+| IAXL | `IAXL_RDMA_CLIENT_NIC_IPS` | 未设置 | client 的 RDMA 网卡 IP；`IAXL_RDMA_ENABLE=1` 时 client 端必须配置 |
+| IAXL | `IAXL_OMP_THREAD_NUM` | 压缩 worker 数 | 驱动压缩的线程数，线程越少占用的 CPU 核越少 |
 
 > [!WARNING]
 > GPU 不支持 P2P DMA 时，请勿启用 `IAXL_DSA_GD_ENABLE`，并保持其值为 `0`。
