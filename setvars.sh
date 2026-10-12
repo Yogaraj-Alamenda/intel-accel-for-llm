@@ -21,7 +21,7 @@ export NVIDIA_RUNTIME=${NVIDIA_RUNTIME:-}     # Set to "none" to skip the nvidia
 export IAXL_KV_COMPRESSION=${IAXL_KV_COMPRESSION:-1} # Enable DEFLATE compression (0/1)
 export IAXL_QAT_ZIP_ENABLE=${IAXL_QAT_ZIP_ENABLE:-1} # Enable QAT compression workers (0/1)
 export IAXL_IAA_ZIP_ENABLE=${IAXL_IAA_ZIP_ENABLE:-0} # Enable IAA (QPL) compression workers (0/1)
-export IAXL_CPU_ZIP_ENABLE=${IAXL_CPU_ZIP_ENABLE:-1} # Enable CPU compression workers (0/1)
+export IAXL_CPU_ZIP_ENABLE=${IAXL_CPU_ZIP_ENABLE:-0} # Enable CPU compression workers (0/1)
 export IAXL_DSA_GD_ENABLE=${IAXL_DSA_GD_ENABLE:-0}   # Use Intel DSA + GDRCopy transfers (0/1)
 
 # ---- Async KV load ----------------------------------------------------------

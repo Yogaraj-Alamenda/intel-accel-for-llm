@@ -59,7 +59,7 @@ __attribute__((constructor(101))) void envs_init(void) {
 
     envs.IAXL_QAT_ZIP_ENABLE = env_bool("IAXL_QAT_ZIP_ENABLE", 1);
     envs.IAXL_IAA_ZIP_ENABLE = env_bool("IAXL_IAA_ZIP_ENABLE", 0);
-    envs.IAXL_CPU_ZIP_ENABLE = env_bool("IAXL_CPU_ZIP_ENABLE", 1);
+    envs.IAXL_CPU_ZIP_ENABLE = env_bool("IAXL_CPU_ZIP_ENABLE", 0);
     envs.IAXL_QAT_INSTANCE_NUM = env_nonnegative_int("IAXL_QAT_INSTANCE_NUM", 4);
     envs.IAXL_IAA_INSTANCE_NUM = env_nonnegative_int("IAXL_IAA_INSTANCE_NUM", 4);
 
