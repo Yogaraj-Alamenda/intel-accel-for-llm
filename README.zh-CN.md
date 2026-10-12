@@ -67,6 +67,7 @@ sudo ./tools/install_gdr_driver.sh
 | 加速器 | `IAXL_IAA_ZIP_ENABLE` | `0` | 通过 Intel QPL 启用 Intel IAA 压缩 worker（`0`/`1`）。可与 QAT 同时开启，每个数据块会记录 IAA 能否解码 |
 | 加速器 | `IAXL_DSA_GD_ENABLE` | `0` | 启用 Intel DSA + GDRCopy 传输（`0`/`1`） |
 | 压缩 | `IAXL_KV_COMPRESSION` | `1` | 对 KV cache 启用 DEFLATE 压缩（`0`/`1`） |
+| 压缩 | `IAXL_KV_DATA_SHUFFLE` | `1` | 压缩前对 BF16 数据做字节重排（`0`/`1`）。会稍微降低压缩性能，但可以提升压缩率和解压性能 |
 | vLLM | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face 模型 ID 或本地模型路径 |
 | vLLM | `TP_SIZE` | `2` | 必须配置；Tensor Parallel worker 数量，CPU、QAT 和 DSA 资源将据此自动配置 |
 | vLLM | `DP_SIZE` | `1` | Data Parallel 组数；rank 总数 = `TP_SIZE × DP_SIZE` |

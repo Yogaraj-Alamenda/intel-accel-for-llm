@@ -81,7 +81,7 @@ printf '%s\n' \
 
 # ---- Cache / compression ----------------------------------------------------
 export IAXL_KV_LOSSY_TRUNC=${IAXL_KV_LOSSY_TRUNC:-0}                     # Lossy LSB truncation: 'auto', 0 (off), or N bits
-export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-0}                   # Byte-shuffle before compression (0/1)
+export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-1}                   # Byte-shuffle before compression (0/1)
 export IAXL_ZIP_SRC_CAP=${IAXL_ZIP_SRC_CAP:-262144}                      # Source/decompressed block capacity (256 KiB)
 export IAXL_ZIP_DST_CAP=${IAXL_ZIP_DST_CAP:-262144}                      # Compressed-output capacity (256 KiB)
 export IAXL_CACHE_DIR=${IAXL_CACHE_DIR:-_data/kvcache}                   # Base directory for persisted cache files

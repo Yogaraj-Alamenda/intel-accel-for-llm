@@ -69,6 +69,7 @@ Common settings in `setvars.sh`. Other variables in `setvars.sh` are advanced se
 | Accelerators | `IAXL_IAA_ZIP_ENABLE` | `0` | Enable Intel IAA compression workers via Intel QPL (`0`/`1`). Can be combined with QAT; each block records whether IAA can decode it |
 | Accelerators | `IAXL_DSA_GD_ENABLE` | `0` | Enable Intel DSA + GDRCopy transfers (`0`/`1`) |
 | Compression | `IAXL_KV_COMPRESSION` | `1` | Enable DEFLATE compression of the KV cache (`0`/`1`) |
+| Compression | `IAXL_KV_DATA_SHUFFLE` | `1` | Byte-shuffle BF16 data before compression (`0`/`1`). Slightly lowers compression throughput, but improves the compression ratio and decompression throughput |
 | vLLM | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face model ID or local model path |
 | vLLM | `TP_SIZE` | `2` | Required; number of Tensor Parallel workers. CPU, QAT, and DSA resources are configured based on this value |
 | vLLM | `DP_SIZE` | `1` | Number of Data Parallel groups; total ranks = `TP_SIZE × DP_SIZE` |
