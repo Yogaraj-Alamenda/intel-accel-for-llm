@@ -36,17 +36,17 @@ A **worker** is one backend instance together with its slots:
 - Each QAT or IAA instance keeps `queue_depth` asynchronous requests in flight.
 - A CPU worker has a single slot and finishes its zlib request inside the submit call.
 
-Workers are numbered QAT first, then IAA, then CPU. Thread `t` owns workers `t, t+T, t+2T, …`. Each instance is therefore polled by exactly one thread, so instances need no locking. The example below uses 2 QAT, 2 IAA and 1 CPU worker with `T = 2`.
+Workers are numbered QAT first, then IAA, then CPU. A CPU worker holds its thread for the whole zlib request, so when `T` exceeds the CPU worker count, each CPU worker gets a thread of its own and the QAT/IAA workers are dealt round-robin over the remaining `T - cpu_workers` threads. Otherwise thread `t` owns workers `t, t+T, t+2T, …`. Each instance is therefore polled by exactly one thread, so instances need no locking. The example below uses 2 QAT, 2 IAA and 1 CPU worker with `T = 2`.
 
 ```mermaid
 flowchart LR
-    T0["Thread 0 (caller)"] --> Q0["QAT 0"] & I0["IAA 0"] & C0["CPU 0"]
-    T1["Thread 1"] --> Q1["QAT 1"] & I1["IAA 1"]
+    T0["Thread 0 (caller)"] --> Q0["QAT 0"] & Q1["QAT 1"] & I0["IAA 0"] & I1["IAA 1"]
+    T1["Thread 1"] --> C0["CPU 0"]
 ```
 
 Every thread runs the same loop over its slots:
 
-1. **Fill:** claim items from the shared cursor and submit one item per slot. Before submitting, compression applies optional lossy truncation and a BF16 byte shuffle to the data in place.
+1. **Fill:** claim items from the shared cursor and submit one item per slot, depth-major (the first slot of every owned worker, then the second, …) so a short batch reaches every instance. Before submitting, compression applies optional lossy truncation and a BF16 byte shuffle to the data in place.
 2. **Poll:** go round the in-flight slots calling the backend's `wait(..., non_block=1)`. A result of `IAXL_ZIP_PENDING` moves on to the next slot.
 3. **Refill:** when a request completes, finish its item. For compression this means writing the block header; for decompression it means copying the data out and undoing the shuffle. Then claim the next item and resubmit it into the same slot. A slot is retired once the cursor is empty.
 
@@ -148,7 +148,7 @@ vLLM's CPU backend also recommends preloading libiomp5 and libtcmalloc through `
 | `IAXL_QAT_ZIP_ENABLE`, `IAXL_IAA_ZIP_ENABLE`, `IAXL_CPU_ZIP_ENABLE` | Enable each backend |
 | `IAXL_QAT_INSTANCE_NUM`, `IAXL_IAA_INSTANCE_NUM`, `IAXL_CPU_ZIP_THREADS` | Number of workers per backend |
 | `IAXL_QAT_ZIP_QUEUE_DEPTH`, `IAXL_IAA_ZIP_QUEUE_DEPTH` | In-flight requests per QAT / IAA worker (≤ 4) |
-| `IAXL_OMP_THREAD_NUM` | Thread count `T`. Defaults to the worker count and must be between 1 and the worker count. With `IAXL_USE_OMP=1`, it is also exported as `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
+| `IAXL_OMP_THREAD_NUM` | Thread count `T`. Defaults to one thread per QAT device (the largest `KVSHRINK_QAT_DEVICES` group, at most the QAT instance count), one for IAA, and one per CPU zip worker; one thread keeps about one QAT device busy. Must be between 1 and the worker count. With `IAXL_USE_OMP=1`, it is also exported as `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
 | `IAXL_USE_OMP` | `1` for OpenMP, `0` for `ThreadPool` |
 | `IAXL_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads in this process |
 | `KVSHRINK_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads for each rank, separated by `\|`. Defaults to `VLLM_CPU_OMP_THREADS_BIND`. |

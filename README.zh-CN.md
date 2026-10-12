@@ -76,7 +76,7 @@ sudo ./tools/install_gdr_driver.sh
 | IAXL | `IAXL_RDMA_ENABLE` | `0` | 通过 RDMA 使用远端 KVStore daemon（`0`/`1`），见[跨节点 KV Cache 复用](#跨节点-kv-cache-复用) |
 | IAXL | `IAXL_RDMA_DAEMON_NIC_IPS` | 未设置 | daemon 的 RDMA 网卡 IP；`IAXL_RDMA_ENABLE=1` 时必须配置 |
 | IAXL | `IAXL_RDMA_CLIENT_NIC_IPS` | 未设置 | client 的 RDMA 网卡 IP；`IAXL_RDMA_ENABLE=1` 时 client 端必须配置 |
-| IAXL | `IAXL_OMP_THREAD_NUM` | 压缩 worker 数 | 驱动压缩的线程数，线程越少占用的 CPU 核越少 |
+| IAXL | `IAXL_OMP_THREAD_NUM` | 每个 QAT 设备一个、IAA 一个，再加 CPU 压缩 worker 数 | 驱动压缩的线程数，线程越少占用的 CPU 核越少 |
 
 > [!WARNING]
 > GPU 不支持 P2P DMA 时，请勿启用 `IAXL_DSA_GD_ENABLE`，并保持其值为 `0`。

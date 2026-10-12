@@ -93,17 +93,34 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
     IAXL_CHECK(iaa_workers == 0 || iaa_workers <= iaa_zip_num_slots() / iaa_zip_queue_depth(),
                "kv_zip: IAXL_IAA_INSTANCE_NUM exceeds available IAA instances");
     const int threads = std::min(envs.IAXL_OMP_THREAD_NUM, worker_count);
+    // A CPU worker holds its thread inside zlib and would stall accelerators polled by the same
+    // thread, so CPU workers get threads of their own whenever the team is large enough.
+    const int accel_workers = qat_workers + iaa_workers;
+    const bool split = accel_workers > 0 && cpu_workers > 0 && threads > cpu_workers;
+    const int accel_threads = split ? threads - cpu_workers : threads;
+    auto owner = [&](int w) {
+        if (!split)
+            return w % threads;
+        return w < accel_workers ? w % accel_threads : accel_threads + (w - accel_workers);
+    };
 
-    // Thread `tid` owns workers tid, tid + threads, ..., so each backend instance stays on one
-    // thread while the backends are spread across all of them.
+    // Each backend instance stays on one thread while the instances are spread across all of them.
     auto drive = [&](int tid) {
         struct Lane {
             ZipBackend backend;
             int slot;
             size_t item;
         };
-        std::vector<Lane> lanes;
-        for (int w = tid; w < worker_count; w += threads) {
+        struct Worker {
+            ZipBackend backend;
+            int base;
+            int depth;
+        };
+        std::vector<Worker> owned;
+        int max_depth = 0;
+        for (int w = 0; w < worker_count; w++) {
+            if (owner(w) != tid)
+                continue;
             ZipBackend backend = ZipBackend::CPU;
             int first = qat_workers + iaa_workers;
             if (w < qat_workers) {
@@ -114,13 +131,21 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
                 first = qat_workers;
             }
             const int depth = ops(backend).queue_depth();
-            for (int k = 0; k < depth; k++) {
-                const size_t i = get_next(backend);
+            owned.push_back({backend, (w - first) * depth, depth});
+            max_depth = std::max(max_depth, depth);
+        }
+
+        // Depth-major so a short batch reaches every owned instance before queueing behind one.
+        std::vector<Lane> lanes;
+        for (int k = 0; k < max_depth; k++) {
+            for (const Worker &wk : owned) {
+                if (k >= wk.depth)
+                    continue;
+                const size_t i = get_next(wk.backend);
                 if (i == kNoTask)
-                    break;
-                const int slot = (w - first) * depth + k;
-                submit(backend, slot, i);
-                lanes.push_back({backend, slot, i});
+                    continue;
+                submit(wk.backend, wk.base + k, i);
+                lanes.push_back({wk.backend, wk.base + k, i});
             }
         }
 

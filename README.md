@@ -78,7 +78,7 @@ Common settings in `setvars.sh`. Other variables in `setvars.sh` are advanced se
 | IAXL | `IAXL_RDMA_ENABLE` | `0` | Use a remote KVStore daemon over RDMA (`0`/`1`); see [cross-node KV Cache reuse](#cross-node-kv-cache-reuse) |
 | IAXL | `IAXL_RDMA_DAEMON_NIC_IPS` | unset | Daemon RDMA NIC IPs; required when `IAXL_RDMA_ENABLE=1` |
 | IAXL | `IAXL_RDMA_CLIENT_NIC_IPS` | unset | Client RDMA NIC IPs; required on the client when `IAXL_RDMA_ENABLE=1` |
-| IAXL | `IAXL_OMP_THREAD_NUM` | Number of compression workers | Threads driving compression. Fewer threads use fewer CPU cores |
+| IAXL | `IAXL_OMP_THREAD_NUM` | One per QAT device, one for IAA, plus CPU zip workers | Threads driving compression. Fewer threads use fewer CPU cores |
 
 > [!WARNING]
 > Do not enable `IAXL_DSA_GD_ENABLE` on GPUs that do not support P2P DMA. Keep it set to `0`.

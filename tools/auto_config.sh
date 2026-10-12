@@ -369,6 +369,28 @@ qat_thread_count() {
     echo "$((${#device_indices[@]} * instances_per_device))"
 }
 
+# Mirrors envs.c: one QAT poller thread per device of the largest rank group ("0,1|2,3"), capped
+# at the instance count.
+qat_poller_count() {
+    local spec=$1
+    local instances=$2
+    local group max=0
+    local -a groups=() device_indices=()
+
+    if ! [[ "$instances" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: IAXL_QAT_INSTANCE_NUM must be a non-negative integer" >&2
+        return 1
+    fi
+    IFS='|' read -r -a groups <<<"$spec"
+    for group in "${groups[@]}"; do
+        IFS=, read -r -a device_indices <<<"$group"
+        ((${#device_indices[@]} > max)) && max=${#device_indices[@]}
+    done
+    ((max > 0)) || max=1
+    ((instances < max)) && max=$instances
+    echo "$max"
+}
+
 cpu_zip_thread_count() {
     local min_rank_cpu_count=$1
     local qat_threads=$2
@@ -380,11 +402,11 @@ cpu_zip_thread_count() {
         return 1
     fi
     if ! [[ "$qat_threads" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: IAXL_QAT_INSTANCE_NUM must be a non-negative integer" >&2
+        echo "ERROR: QAT poller count must be a non-negative integer" >&2
         return 1
     fi
     if ! [[ "$iaa_threads" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: IAXL_IAA_INSTANCE_NUM must be a non-negative integer" >&2
+        echo "ERROR: IAA poller count must be a non-negative integer" >&2
         return 1
     fi
     if ! [[ "$reserved_cpus" =~ ^[0-9]+$ ]]; then
@@ -451,7 +473,7 @@ omp_thread_count() {
     local iaa_threads=${3:-0}
 
     if ! [[ "$qat_threads" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: IAXL_QAT_INSTANCE_NUM must be a non-negative integer" >&2
+        echo "ERROR: QAT poller count must be a non-negative integer" >&2
         return 1
     fi
     if ! [[ "$cpu_zip_threads" =~ ^[0-9]+$ ]]; then
@@ -459,7 +481,7 @@ omp_thread_count() {
         return 1
     fi
     if ! [[ "$iaa_threads" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: IAXL_IAA_INSTANCE_NUM must be a non-negative integer" >&2
+        echo "ERROR: IAA poller count must be a non-negative integer" >&2
         return 1
     fi
     echo "$((qat_threads + iaa_threads + cpu_zip_threads))"

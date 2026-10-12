@@ -52,6 +52,25 @@ static int available_cpu_count(void) {
     return n > 0 ? (int)n : 1;
 }
 
+// Devices in the largest rank group of KVSHRINK_QAT_DEVICES ("0,1|2,3"). The connector rewrites
+// IAXL_QAT_DEVICES per rank only after this library has loaded.
+static int qat_device_count(void) {
+    const char *list = env_str("KVSHRINK_QAT_DEVICES", NULL);
+    if (!list)
+        list = env_str("IAXL_QAT_DEVICES", "0");
+    int best = 0, n = 0;
+    for (const char *p = list; *p; p++) {
+        if (*p == '|') {
+            best = n > best ? n : best;
+            n = 0;
+        } else if (*p != ',' && (p == list || p[-1] == ',' || p[-1] == '|')) {
+            n++;
+        }
+    }
+    best = n > best ? n : best;
+    return best > 0 ? best : 1;
+}
+
 __attribute__((constructor(101))) void envs_init(void) {
 
     envs.IAXL_ZIP_SRC_CAP = env_int("IAXL_ZIP_SRC_CAP", 256 * 1024);
@@ -74,9 +93,13 @@ __attribute__((constructor(101))) void envs_init(void) {
         envs.IAXL_IAA_INSTANCE_NUM = 0;
     if (!envs.IAXL_CPU_ZIP_ENABLE)
         envs.IAXL_CPU_ZIP_THREADS = 0;
-    envs.IAXL_OMP_THREAD_NUM =
-        env_int("IAXL_OMP_THREAD_NUM", envs.IAXL_QAT_INSTANCE_NUM + envs.IAXL_IAA_INSTANCE_NUM +
-                                           envs.IAXL_CPU_ZIP_THREADS);
+    // One poller keeps about one QAT device busy; CPU zip workers hold their thread in zlib.
+    int qat_pollers = qat_device_count();
+    if (qat_pollers > envs.IAXL_QAT_INSTANCE_NUM)
+        qat_pollers = envs.IAXL_QAT_INSTANCE_NUM;
+    const int iaa_pollers = envs.IAXL_IAA_INSTANCE_NUM > 0 ? 1 : 0;
+    envs.IAXL_OMP_THREAD_NUM = env_int("IAXL_OMP_THREAD_NUM",
+                                       qat_pollers + iaa_pollers + envs.IAXL_CPU_ZIP_THREADS);
     if (envs.IAXL_OMP_THREAD_NUM < 1)
         envs.IAXL_OMP_THREAD_NUM = 1;
     envs.IAXL_USE_OMP = env_bool("IAXL_USE_OMP", 1);

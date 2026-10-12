@@ -95,24 +95,27 @@ export IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS=${IAXL_KVSTORE_SKIP_COMPRESSION_LAYE
 
 # ---- Intel QAT (compression accelerator) ------------------------------------
 export IAXL_QAT_DEVICES=${IAXL_QAT_DEVICES:-0}                                   # Comma-separated QAT device indices, e.g. "0,1"
-export IAXL_QAT_ZIP_INSTANCES_PER_DEVICE=${IAXL_QAT_ZIP_INSTANCES_PER_DEVICE:-2} # Instances (driving threads) per device
-# QAT driving threads = number of devices x instances-per-device (override to force).
+export IAXL_QAT_ZIP_INSTANCES_PER_DEVICE=${IAXL_QAT_ZIP_INSTANCES_PER_DEVICE:-2} # Instances per device
+# QAT instances = number of devices x instances-per-device (override to force).
 case "${IAXL_QAT_ZIP_ENABLE,,}" in
     1|true|yes|on)
         export IAXL_QAT_INSTANCE_NUM=${IAXL_QAT_INSTANCE_NUM:-$(qat_thread_count "$IAXL_QAT_DEVICES" "$IAXL_QAT_ZIP_INSTANCES_PER_DEVICE")} || return 1 2>/dev/null || exit 1
+        # One poller thread keeps about one QAT device busy; size for the largest rank group.
+        QAT_ZIP_POLLERS=$(qat_poller_count "${KVSHRINK_QAT_DEVICES:-$IAXL_QAT_DEVICES}" "$IAXL_QAT_INSTANCE_NUM") || return 1 2>/dev/null || exit 1
         ;;
-    *) export IAXL_QAT_INSTANCE_NUM=0 ;;
+    *) export IAXL_QAT_INSTANCE_NUM=0; QAT_ZIP_POLLERS=0 ;;
 esac
 export IAXL_QAT_ZIP_QUEUE_DEPTH=${IAXL_QAT_ZIP_QUEUE_DEPTH:-4} # In-flight requests per instance (<= 4)
 
 # ---- Intel IAA (compression accelerator, via Intel QPL) ---------------------
 export IAXL_IAA_DEVICES=${IAXL_IAA_DEVICES:-auto}                                # Comma-separated NUMA nodes for IAA jobs, or "auto"
-export IAXL_IAA_ZIP_INSTANCES_PER_DEVICE=${IAXL_IAA_ZIP_INSTANCES_PER_DEVICE:-4} # Instances (driving threads) per IAA device; a NUMA node usually owns several
+export IAXL_IAA_ZIP_INSTANCES_PER_DEVICE=${IAXL_IAA_ZIP_INSTANCES_PER_DEVICE:-4} # Instances per IAA device; a NUMA node usually owns several
 case "${IAXL_IAA_ZIP_ENABLE,,}" in
     1|true|yes|on)
-    	export IAXL_IAA_INSTANCE_NUM=${IAXL_IAA_INSTANCE_NUM:-4}
+        export IAXL_IAA_INSTANCE_NUM=${IAXL_IAA_INSTANCE_NUM:-4}
+        IAA_ZIP_POLLERS=$((IAXL_IAA_INSTANCE_NUM > 0 ? 1 : 0))
         ;;
-    *) export IAXL_IAA_INSTANCE_NUM=0 ;;
+    *) export IAXL_IAA_INSTANCE_NUM=0; IAA_ZIP_POLLERS=0 ;;
 esac
 export IAXL_IAA_ZIP_QUEUE_DEPTH=${IAXL_IAA_ZIP_QUEUE_DEPTH:-4} # In-flight requests per instance (<= 4)
 
@@ -120,13 +123,13 @@ export IAXL_IAA_ZIP_QUEUE_DEPTH=${IAXL_IAA_ZIP_QUEUE_DEPTH:-4} # In-flight reque
 export IAXL_RESERVED_CPU_NUM=${IAXL_RESERVED_CPU_NUM:-4} # CPUs reserved for inference and other tasks
 case "${IAXL_CPU_ZIP_ENABLE,,}" in
     1|true|yes|on)
-        export IAXL_CPU_ZIP_THREADS=${IAXL_CPU_ZIP_THREADS:-$(cpu_zip_thread_count "$MIN_RANK_CPU_COUNT" "$IAXL_QAT_INSTANCE_NUM" "$IAXL_RESERVED_CPU_NUM" "$IAXL_IAA_INSTANCE_NUM")} || return 1 2>/dev/null || exit 1
+        export IAXL_CPU_ZIP_THREADS=${IAXL_CPU_ZIP_THREADS:-$(cpu_zip_thread_count "$MIN_RANK_CPU_COUNT" "$QAT_ZIP_POLLERS" "$IAXL_RESERVED_CPU_NUM" "$IAA_ZIP_POLLERS")} || return 1 2>/dev/null || exit 1
         ;;
     *) export IAXL_CPU_ZIP_THREADS=0 ;;
 esac
 if env_truthy "$IAXL_QAT_ZIP_ENABLE" "$IAXL_IAA_ZIP_ENABLE" "$IAXL_CPU_ZIP_ENABLE"; then
-    # Defaults to one thread per zip worker; fewer threads each poll several workers (1 = caller only).
-    export IAXL_OMP_THREAD_NUM=${IAXL_OMP_THREAD_NUM:-$(omp_thread_count "$IAXL_QAT_INSTANCE_NUM" "$IAXL_CPU_ZIP_THREADS" "$IAXL_IAA_INSTANCE_NUM")} || return 1 2>/dev/null || exit 1
+    # Defaults to one poller per QAT device, one for IAA, and one per CPU zip worker.
+    export IAXL_OMP_THREAD_NUM=${IAXL_OMP_THREAD_NUM:-$(omp_thread_count "$QAT_ZIP_POLLERS" "$IAXL_CPU_ZIP_THREADS" "$IAA_ZIP_POLLERS")} || return 1 2>/dev/null || exit 1
 else
     # No zip worker: OpenMP threads only copy raw KV blocks on the host; cap at 4.
     if [[ -z "$IAXL_OMP_THREAD_NUM" ]]; then
