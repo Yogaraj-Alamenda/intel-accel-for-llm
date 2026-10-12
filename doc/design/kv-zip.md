@@ -112,7 +112,7 @@ With `IAXL_USE_OMP=0`, iaxl leaves the OpenMP runtime and the `OMP_*` variables 
 
 `IAXL_CPU_OMP_THREADS_BIND` lists the CPUs that iaxl's threads run on, for example `0-7,16`.
 
-- Each `TaskQueue` thread (`OMP-Main`, `H2D`, `D2H`, …) pins itself to this list when it starts, and threads it creates later, such as `POOL-<tid>`, inherit the pinning.
+- Each `TaskQueue` thread (`OMP-Main`, `H2D`, `D2H`, …) and each `POOL-<tid>` thread pins itself to this list when it starts, so pool threads are pinned even when the pool is first used from an unpinned thread.
 - libiomp5 resets the affinity of the OpenMP threads it creates, so in OpenMP mode each team thread pins itself again once inside `run_threads`.
 - When the variable is unset, threads keep the affinity they inherit.
 

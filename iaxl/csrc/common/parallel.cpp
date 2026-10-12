@@ -40,6 +40,8 @@ void ThreadPool::run(int n, const std::function<void(int)> &fn) {
 
 void ThreadPool::loop(int tid) {
     pthread_setname_np(pthread_self(), ("POOL-" + std::to_string(tid)).c_str());
+    // The first caller of instance() may not be a pinned TaskQueue thread.
+    TaskQueue::bind_cpus();
     t_pool = this;
     uint64_t seen = 0;
     std::unique_lock<std::mutex> lock(mutex_);
