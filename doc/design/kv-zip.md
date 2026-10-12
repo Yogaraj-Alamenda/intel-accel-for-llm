@@ -50,7 +50,18 @@ Every thread runs the same loop over its slots:
 2. **Poll:** go round the in-flight slots calling the backend's `wait(..., non_block=1)`. A result of `IAXL_ZIP_PENDING` moves on to the next slot.
 3. **Refill:** when a request completes, finish its item. For compression this means writing the block header; for decompression it means copying the data out and undoing the shuffle. Then claim the next item and resubmit it into the same slot. A slot is retired once the cursor is empty.
 
-Items are claimed as requests complete instead of being split up front, so faster backends automatically take a larger share of the batch. Polling never blocks, which allows `T` to range from 1 up to the worker count. At `T = 1` the caller drives every worker alone. Using fewer threads gives up some throughput but leaves more CPU cores free for inference.
+Items are claimed as requests complete instead of being split up front, so faster backends automatically take a larger share of the batch. Polling never blocks, which allows `T` to range from 1 up to the worker count. At `T = 1` the caller drives every worker alone.
+
+### Fewer Threads Than Workers
+
+A QAT or IAA worker keeps up to `queue_depth` (at most 4) requests in flight while its thread polls other slots. One thread can therefore keep several accelerator instances busy, and `T` can be well below the worker count. A CPU worker is different: it runs zlib inside the submit call and holds its thread for the whole request.
+
+Each thread busy-polls for the whole batch, so every thread costs one core while a batch runs. To use the fewest cores:
+
+- Disable CPU zip (`IAXL_CPU_ZIP_ENABLE=0`) so that only QAT and IAA compress.
+- Set a small `IAXL_OMP_THREAD_NUM`, such as 1 or 2.
+
+Fewer threads give up some peak throughput but leave more cores for inference.
 
 ## Block Format and Routing
 
@@ -81,10 +92,52 @@ IAA and QAT/CPU blocks are tracked with two separate cursors. Batches stored wit
 
 | `IAXL_USE_OMP` | Runtime | Behavior |
 | --- | --- | --- |
-| `1` (default) | OpenMP `parallel num_threads(n)` | Shares libgomp and the `OMP_*` settings with torch and vLLM. Idle threads spin briefly, which gives the lowest wake-up latency. |
-| `0` | `parallel::ThreadPool` | Creates `IAXL_OMP_THREAD_NUM - 1` threads named `POOL-<tid>` on first use; the caller acts as thread 0. Idle threads sleep on a condition variable, and the pool is independent of vLLM's use of OpenMP. |
+| `1` (default) | OpenMP `parallel num_threads(n)` | Shares the process's OpenMP runtime (libgomp, or libiomp5 when preloaded) with torch and vLLM. `setvars.sh` sets `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT` to `IAXL_OMP_THREAD_NUM`. Idle threads spin after each region, which gives the lowest wake-up latency. |
+| `0` | `parallel::ThreadPool` | Creates `IAXL_OMP_THREAD_NUM - 1` threads named `POOL-<tid>` on first use; the caller acts as thread 0. Idle threads sleep on a condition variable. kv_zip and the queue threads start no OpenMP region, and `setvars.sh` leaves `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT` unset. |
 
 The pool runs one team at a time. A nested run on the same pool aborts instead of deadlocking. The pool is never destroyed, so work still in flight when the process exits keeps valid state.
+
+### Why Not OpenMP
+
+When vLLM runs inference on the CPU, its kernels run on OpenMP. vLLM's CPU worker pins one OpenMP thread to each CPU of its `VLLM_CPU_OMP_THREADS_BIND` entry and refuses `torch.set_num_threads` afterwards. Sharing that runtime with iaxl causes two problems:
+
+- The `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT` values that iaxl needs in OpenMP mode would also cap vLLM's teams.
+- Idle OpenMP threads keep spinning after each region (libiomp5 spins for `KMP_BLOCKTIME`, 200 ms by default). Between batches this burns cores that do no zip work.
+
+With `IAXL_USE_OMP=0`, iaxl leaves the OpenMP runtime and the `OMP_*` variables to vLLM, and its idle threads use no CPU.
+
+## CPU Affinity
+
+`IAXL_CPU_OMP_THREADS_BIND` lists the CPUs that iaxl's threads run on, for example `0-7,16`.
+
+- Each `TaskQueue` thread (`OMP-Main`, `H2D`, `D2H`, …) pins itself to this list when it starts, and threads it creates later, such as `POOL-<tid>`, inherit the pinning.
+- libiomp5 resets the affinity of the OpenMP threads it creates, so in OpenMP mode each team thread pins itself again once inside `run_threads`.
+- When the variable is unset, threads keep the affinity they inherit.
+
+Under vLLM, the connector sets this variable for each rank from `KVSHRINK_CPU_OMP_THREADS_BIND`. That variable uses the `|`-separated format of `VLLM_CPU_OMP_THREADS_BIND`, with one entry per global rank, and defaults to it. iaxl can therefore run on different CPUs from vLLM.
+
+## CPU Inference
+
+When vLLM runs inference on the CPU, the goal is to keep the inference cores for vLLM and to compress on QAT and IAA, driven from a few separate cores.
+
+| Setting | Reason |
+| --- | --- |
+| `IAXL_USE_OMP=0` | Keeps iaxl off vLLM's OpenMP runtime and `OMP_*` variables |
+| `IAXL_CPU_ZIP_ENABLE=0` | QAT and IAA compress; no core runs zlib |
+| Small `IAXL_OMP_THREAD_NUM`, such as 1 or 2 | Each thread polls several accelerator instances |
+| `VLLM_CPU_OMP_THREADS_BIND` | Inference cores for each rank |
+| `KVSHRINK_CPU_OMP_THREADS_BIND` | iaxl cores for each rank, at least `IAXL_OMP_THREAD_NUM` of them. They must not overlap the inference cores and should be on the same NUMA node as the rank. |
+
+Example with two ranks:
+
+```bash
+export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"      # inference
+export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # iaxl
+export IAXL_USE_OMP=0 IAXL_CPU_ZIP_ENABLE=0 IAXL_OMP_THREAD_NUM=2
+source setvars.sh
+```
+
+vLLM's CPU backend also recommends preloading libiomp5 and libtcmalloc through `LD_PRELOAD`.
 
 ## Configuration
 
@@ -93,7 +146,9 @@ The pool runs one team at a time. A nested run on the same pool aborts instead o
 | `IAXL_QAT_ZIP_ENABLE`, `IAXL_IAA_ZIP_ENABLE`, `IAXL_CPU_ZIP_ENABLE` | Enable each backend |
 | `IAXL_QAT_INSTANCE_NUM`, `IAXL_IAA_INSTANCE_NUM`, `IAXL_CPU_ZIP_THREADS` | Number of workers per backend |
 | `IAXL_QAT_ZIP_QUEUE_DEPTH`, `IAXL_IAA_ZIP_QUEUE_DEPTH` | In-flight requests per QAT / IAA worker (≤ 4) |
-| `IAXL_OMP_THREAD_NUM` | Thread count `T`. Defaults to the worker count and must be between 1 and the worker count. Also exported as `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
+| `IAXL_OMP_THREAD_NUM` | Thread count `T`. Defaults to the worker count and must be between 1 and the worker count. With `IAXL_USE_OMP=1`, it is also exported as `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
 | `IAXL_USE_OMP` | `1` for OpenMP, `0` for `ThreadPool` |
+| `IAXL_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads in this process |
+| `KVSHRINK_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads for each rank, separated by `\|`. Defaults to `VLLM_CPU_OMP_THREADS_BIND`. |
 
 `setvars.sh` derives the defaults, and `tools/auto_config.sh` rejects inconsistent combinations.
