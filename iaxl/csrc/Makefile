@@ -93,7 +93,7 @@ $(LIBDIR)/libqat_s.so:
 	    && wget -q "$(QATURL)" \
 	    && tar xf *.tar.gz \
 	    && export KERNEL_SOURCE_ROOT=$$(ls -dv /usr/src/linux-headers-*-generic | tail -n 1) \
-	    && ./configure \
+	    && ./configure --disable-dc-strict-mode \
 	    && sed "s/^ALL_TARGETS\ *=\ *.*/ALL_TARGETS = lac_user/g" -i quickassist/Makefile \
 	    && make -j"$$(nproc)" quickassist-all
 	cp -a $(QATBUILD)/build/*.so $(LIBDIR)/

@@ -285,6 +285,7 @@ static IaaSlot *resolve_slot(int slot) {
 static void prepare_job(IaaSlot *sl) {
     qpl_job *job = sl->job;
     job->op = sl->compress ? qpl_op_compress : qpl_op_decompress;
+    // The IAA hardware path only supports level 1 (higher levels fail with status 87).
     job->level = qpl_default_level;
     job->huffman_table = NULL;
     job->next_in_ptr = sl->in;

@@ -52,7 +52,7 @@ class Envs:
         if self.IAXL_KV_COMPRESSION and not (
             _bool("IAXL_QAT_ZIP_ENABLE", True)
             or _bool("IAXL_IAA_ZIP_ENABLE")
-            or _bool("IAXL_CPU_ZIP_ENABLE", True)
+            or _bool("IAXL_CPU_ZIP_ENABLE", False)
         ):
             raise ValueError(
                 "IAXL_KV_COMPRESSION=1 requires at least one zip backend; "

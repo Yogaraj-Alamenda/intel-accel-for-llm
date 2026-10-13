@@ -65,10 +65,11 @@ sudo ./tools/install_gdr_driver.sh
 | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face 模型 ID 或本地模型路径 |
 | `TP_SIZE` | `2` | 必须配置；Tensor Parallel worker 数量，CPU、QAT 和 DSA 资源将据此自动配置 |
 | `IAXL_KV_COMPRESSION` | `1` | 启用 DEFLATE 压缩（`0`/`1`） |
+| `IAXL_ZIP_LEVEL` | `1` | 所有压缩后端的压缩级别，取值 `1`（最快）到 `9`（压缩率最高）。QAT 和 CPU 直接使用该级别；IAA 硬件只支持 level 1，因此 IAA 忽略此配置。建议保持默认值 `1`：提高级别对 KV cache 压缩率的提升很有限，却会明显降低压缩速度 |
 | `IAXL_QAT_ZIP_ENABLE` | `1` | 启用 QAT 压缩 worker（`0`/`1`） |
 | `IAXL_QATLIB` | 未设置（`oot`） | 可选。构建所用的 QAT 用户态库：`oot`（构建到 `_lib` 的 out-of-tree 驱动包，未设置时使用）或 `intree`（in-tree 驱动对应的系统 qatlib） |
 | `IAXL_IAA_ZIP_ENABLE` | `0` | 通过 Intel QPL 启用 Intel IAA 压缩 worker（`0`/`1`）。可与 `IAXL_QAT_ZIP_ENABLE` 同时开启：IAA 最多只能解码 4 KB 的 DEFLATE 历史窗口，而 QAT gen4 固定使用 32 KB，因此每个数据块都会记录 IAA 能否解码，解压时 IAA 只领取这些块 |
-| `IAXL_CPU_ZIP_ENABLE` | `1` | 启用 CPU 压缩 worker（`0`/`1`） |
+| `IAXL_CPU_ZIP_ENABLE` | `0` | 启用 CPU 压缩 worker（`0`/`1`）。CPU 压缩会大幅提高 CPU 占用率，QAT/IAA 加速器性能足够时请不要开启 |
 | `IAXL_DSA_GD_ENABLE` | `0` | 启用 Intel DSA + GDRCopy 传输（`0`/`1`） |
 | `IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS` | `1` | 前 N 层 KV cache 不进行压缩 |
 | `PYTHONOPTIMIZE` | `0` | 保留 Python `assert` 检查 |

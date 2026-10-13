@@ -67,10 +67,11 @@ Common settings in `setvars.sh`:
 | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face model ID or local model path |
 | `TP_SIZE` | `2` | Required; number of Tensor Parallel workers. CPU, QAT, and DSA resources are configured based on this value |
 | `IAXL_KV_COMPRESSION` | `1` | Enable DEFLATE compression (`0`/`1`) |
+| `IAXL_ZIP_LEVEL` | `1` | Compression level for all zip backends, from `1` (fastest) to `9` (best ratio). QAT and CPU use the level as is. IAA hardware only supports level 1, so IAA ignores this setting. Keep the default `1`: higher levels barely improve the KV cache compression ratio but make compression much slower |
 | `IAXL_QAT_ZIP_ENABLE` | `1` | Enable QAT compression workers (`0`/`1`) |
 | `IAXL_QATLIB` | unset (`oot`) | Optional. QAT user-space library used by the build: `oot` (out-of-tree package built into `_lib`, used when unset) or `intree` (system qatlib for the in-tree driver) |
 | `IAXL_IAA_ZIP_ENABLE` | `0` | Enable Intel IAA compression workers via Intel QPL (`0`/`1`). Can be combined with `IAXL_QAT_ZIP_ENABLE`: IAA decodes at most a 4 KB DEFLATE history window while QAT gen4 always compresses with 32 KB, so each block records whether IAA can decode it and IAA only claims those on the way back |
-| `IAXL_CPU_ZIP_ENABLE` | `1` | Enable CPU compression workers (`0`/`1`) |
+| `IAXL_CPU_ZIP_ENABLE` | `0` | Enable CPU compression workers (`0`/`1`). CPU compression uses a lot of CPU time, so leave it off when the QAT/IAA accelerators already provide enough throughput |
 | `IAXL_DSA_GD_ENABLE` | `0` | Enable Intel DSA + GDRCopy transfers (`0`/`1`) |
 | `IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS` | `1` | Do not compress the KV cache for the first N layers |
 | `PYTHONOPTIMIZE` | `0` | Preserve Python `assert` checks |

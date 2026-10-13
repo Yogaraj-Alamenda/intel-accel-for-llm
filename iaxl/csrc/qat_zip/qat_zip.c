@@ -95,7 +95,7 @@ static int submit_op(Instance *d, int si, int compress, void *src, uint32_t src_
     sl->op.flushFlag = CPA_DC_FLUSH_FINAL;
 
     if (compress)
-        sl->op.compressAndVerify = CPA_TRUE;
+        sl->op.compressAndVerify = CPA_FALSE;
 
     sl->done = 0;
     CpaStatus s = compress ? cpaDcCompressData2(d->inst, d->sess, &sl->lsrc, &sl->ldst, &sl->op,
@@ -195,7 +195,7 @@ static int parse_selection(const char *env, int discovered, int *sel, int max_se
 static void instance_init(Instance *d, const RawInst *r) {
     CpaDcSessionSetupData sd = {0};
 
-    sd.compLevel = CPA_DC_L12;
+    sd.compLevel = (CpaDcCompLvl)(CPA_DC_L1 + envs.IAXL_ZIP_LEVEL - 1);
     sd.compType = CPA_DC_DEFLATE;
     sd.huffType = CPA_DC_HT_FULL_DYNAMIC;
     sd.sessDirection = CPA_DC_DIR_COMBINED;

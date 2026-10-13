@@ -74,7 +74,7 @@ int cpu_zip_compress(int slot, void *src, int len) {
     CpuZipSlot *state = &g_slots[slot];
     z_stream stream = {0};
     state->ready = 0;
-    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, compress_window_bits(), 8,
+    if (deflateInit2(&stream, envs.IAXL_ZIP_LEVEL, Z_DEFLATED, compress_window_bits(), 8,
                      Z_DEFAULT_STRATEGY) != Z_OK)
         return -1;
     stream.next_in = src;

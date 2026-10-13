@@ -21,7 +21,7 @@ export NVIDIA_RUNTIME=${NVIDIA_RUNTIME:-}     # Set to "none" to skip the nvidia
 export IAXL_KV_COMPRESSION=${IAXL_KV_COMPRESSION:-1} # Enable DEFLATE compression (0/1)
 export IAXL_QAT_ZIP_ENABLE=${IAXL_QAT_ZIP_ENABLE:-1} # Enable QAT compression workers (0/1)
 export IAXL_IAA_ZIP_ENABLE=${IAXL_IAA_ZIP_ENABLE:-0} # Enable IAA (QPL) compression workers (0/1)
-export IAXL_CPU_ZIP_ENABLE=${IAXL_CPU_ZIP_ENABLE:-1} # Enable CPU compression workers (0/1)
+export IAXL_CPU_ZIP_ENABLE=${IAXL_CPU_ZIP_ENABLE:-0} # Enable CPU compression workers (0/1); costs a lot of CPU, keep off unless needed
 export IAXL_DSA_GD_ENABLE=${IAXL_DSA_GD_ENABLE:-0}   # Use Intel DSA + GDRCopy transfers (0/1)
 
 # ---- Async KV load ----------------------------------------------------------
@@ -80,6 +80,7 @@ printf '%s\n' \
 # ---- Cache / compression ----------------------------------------------------
 export IAXL_KV_LOSSY_TRUNC=${IAXL_KV_LOSSY_TRUNC:-0}                     # Lossy LSB truncation: 'auto', 0 (off), or N bits
 export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-0}                   # Byte-shuffle before compression (0/1)
+export IAXL_ZIP_LEVEL=${IAXL_ZIP_LEVEL:-1}                               # Compression level 1-9: higher = better ratio, slower
 export IAXL_ZIP_SRC_CAP=${IAXL_ZIP_SRC_CAP:-262144}                      # Source/decompressed block capacity (256 KiB)
 export IAXL_ZIP_DST_CAP=${IAXL_ZIP_DST_CAP:-262144}                      # Compressed-output capacity (256 KiB)
 export IAXL_CACHE_DIR=${IAXL_CACHE_DIR:-_data/kvcache}                   # Base directory for persisted cache files

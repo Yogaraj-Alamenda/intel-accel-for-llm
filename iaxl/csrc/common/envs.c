@@ -56,10 +56,16 @@ __attribute__((constructor(101))) void envs_init(void) {
 
     envs.IAXL_ZIP_SRC_CAP = env_int("IAXL_ZIP_SRC_CAP", 256 * 1024);
     envs.IAXL_ZIP_DST_CAP = env_int("IAXL_ZIP_DST_CAP", 256 * 1024);
+    envs.IAXL_ZIP_LEVEL = env_int("IAXL_ZIP_LEVEL", 1);
+    if (envs.IAXL_ZIP_LEVEL < 1 || envs.IAXL_ZIP_LEVEL > 9) {
+        fprintf(stderr, "[iaxl] ERROR: IAXL_ZIP_LEVEL=%d is out of range; expected 1-9\n",
+                envs.IAXL_ZIP_LEVEL);
+        abort();
+    }
 
     envs.IAXL_QAT_ZIP_ENABLE = env_bool("IAXL_QAT_ZIP_ENABLE", 1);
     envs.IAXL_IAA_ZIP_ENABLE = env_bool("IAXL_IAA_ZIP_ENABLE", 0);
-    envs.IAXL_CPU_ZIP_ENABLE = env_bool("IAXL_CPU_ZIP_ENABLE", 1);
+    envs.IAXL_CPU_ZIP_ENABLE = env_bool("IAXL_CPU_ZIP_ENABLE", 0);
     envs.IAXL_QAT_INSTANCE_NUM = env_nonnegative_int("IAXL_QAT_INSTANCE_NUM", 4);
     envs.IAXL_IAA_INSTANCE_NUM = env_nonnegative_int("IAXL_IAA_INSTANCE_NUM", 4);
 
@@ -120,7 +126,7 @@ __attribute__((constructor(101))) void envs_init(void) {
          printf("[iaxl] config: qat_zip=%s iaa_zip=%s cpu_zip=%s qat_instances=%d "
              "iaa_instances=%d cpu_zip_threads=%d "
              "omp_threads=%d cpus=%d "
-               "compression=%s data_shuffle=%s lossy_trunc=%d dsa_gd=%s "
+               "compression=%s zip_level=%d data_shuffle=%s lossy_trunc=%d dsa_gd=%s "
                "dsa_gd_reset=%s "
                "profile=%s\n",
                envs.IAXL_QAT_ZIP_ENABLE ? "ON" : "OFF",
@@ -129,7 +135,7 @@ __attribute__((constructor(101))) void envs_init(void) {
                envs.IAXL_IAA_INSTANCE_NUM,
                envs.IAXL_CPU_ZIP_THREADS,
                envs.IAXL_OMP_THREAD_NUM, cpus, envs.IAXL_KV_COMPRESSION ? "ON" : "OFF",
-               envs.IAXL_KV_DATA_SHUFFLE ? "ON" : "OFF", envs.IAXL_KV_LOSSY_TRUNC,
+               envs.IAXL_ZIP_LEVEL, envs.IAXL_KV_DATA_SHUFFLE ? "ON" : "OFF", envs.IAXL_KV_LOSSY_TRUNC,
                envs.IAXL_DSA_GD_ENABLE ? "ON" : "OFF",
                envs.IAXL_DSA_GD_RESET_ON_DESTROY ? "ON" : "OFF", envs.IAXL_PROFILE_MODE);
     }
