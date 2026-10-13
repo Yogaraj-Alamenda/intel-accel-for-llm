@@ -180,7 +180,21 @@ class KVShrinkConnector(KVConnectorBase_V1):
                 self._bind_intel_accel()
 
     def _bind_cpu_affinity(self) -> None:
-        if self.vllm_device == "cpu":
+        spec = os.getenv("KVSHRINK_CPU_OMP_THREADS_BIND")
+        if spec:
+            cpus = spec.split("|")
+            if len(cpus) <= self.global_rank:
+                raise ValueError(
+                    f"KVSHRINK_CPU_OMP_THREADS_BIND has {len(cpus)} entries, "
+                    f"but rank is {self.global_rank}"
+                )
+            os.environ["IAXL_CPU_OMP_THREADS_BIND"] = cpus[self.global_rank]
+            logger.info(
+                "Bound rank %d: IAXL_CPU_OMP_THREADS_BIND=%s",
+                self.global_rank,
+                cpus[self.global_rank],
+            )
+        if self.vllm_device == "cpu":  # vLLM's CPU worker binds itself
             return
         bind_cpu_affinity(
             self.global_rank, self.global_size, envs.VLLM_CPU_OMP_THREADS_BIND

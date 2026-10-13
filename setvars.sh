@@ -38,6 +38,7 @@ export DP_SIZE="${DP_SIZE:-1}"            # Data-parallel group count
 NUM_WORKERS=$((TP_SIZE * DP_SIZE))
 VLLM_CPU_OMP_THREADS_BIND="${VLLM_CPU_OMP_THREADS_BIND:-$(cpu_auto_detect "$NUM_WORKERS")}" || return 1 2>/dev/null || exit 1
 export VLLM_CPU_OMP_THREADS_BIND # Per-worker CPU affinity (one entry per global rank)
+export KVSHRINK_CPU_OMP_THREADS_BIND="${KVSHRINK_CPU_OMP_THREADS_BIND:-$VLLM_CPU_OMP_THREADS_BIND}" # Per-worker CPUs for iaxl threads (one entry per global rank)
 rank_cpu_counts "$VLLM_CPU_OMP_THREADS_BIND" "$NUM_WORKERS" || return 1 2>/dev/null || exit 1
 case "${IAXL_QAT_ZIP_ENABLE,,}" in
     1|true|yes|on)
@@ -70,6 +71,7 @@ printf '%s\n' \
     "  IAXL_CPU_ZIP_ENABLE=$IAXL_CPU_ZIP_ENABLE" \
     "  IAXL_DSA_GD_ENABLE=$IAXL_DSA_GD_ENABLE" \
     "  VLLM_CPU_OMP_THREADS_BIND=$VLLM_CPU_OMP_THREADS_BIND" \
+    "  KVSHRINK_CPU_OMP_THREADS_BIND=$KVSHRINK_CPU_OMP_THREADS_BIND" \
     "  KVSHRINK_QAT_DEVICES=${KVSHRINK_QAT_DEVICES:-disabled}" \
     "  KVSHRINK_DSA_DEVICES=${KVSHRINK_DSA_DEVICES:-disabled}" \
     "  KVSHRINK_VLLM_KV_ASYNC_LOAD_ENABLED=$KVSHRINK_VLLM_KV_ASYNC_LOAD_ENABLED" \
@@ -79,7 +81,7 @@ printf '%s\n' \
 
 # ---- Cache / compression ----------------------------------------------------
 export IAXL_KV_LOSSY_TRUNC=${IAXL_KV_LOSSY_TRUNC:-0}                     # Lossy LSB truncation: 'auto', 0 (off), or N bits
-export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-0}                   # Byte-shuffle before compression (0/1)
+export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-1}                   # Byte-shuffle before compression (0/1)
 export IAXL_ZIP_LEVEL=${IAXL_ZIP_LEVEL:-1}                               # Compression level 1-9: higher = better ratio, slower
 export IAXL_ZIP_SRC_CAP=${IAXL_ZIP_SRC_CAP:-262144}                      # Source/decompressed block capacity (256 KiB)
 export IAXL_ZIP_DST_CAP=${IAXL_ZIP_DST_CAP:-262144}                      # Compressed-output capacity (256 KiB)
@@ -124,7 +126,8 @@ case "${IAXL_CPU_ZIP_ENABLE,,}" in
     *) export IAXL_CPU_ZIP_THREADS=0 ;;
 esac
 if env_truthy "$IAXL_QAT_ZIP_ENABLE" "$IAXL_IAA_ZIP_ENABLE" "$IAXL_CPU_ZIP_ENABLE"; then
-    export IAXL_OMP_THREAD_NUM=$(omp_thread_count "$IAXL_QAT_INSTANCE_NUM" "$IAXL_CPU_ZIP_THREADS" "$IAXL_IAA_INSTANCE_NUM") || return 1 2>/dev/null || exit 1
+    # Defaults to one thread per zip worker; fewer threads each poll several workers (1 = caller only).
+    export IAXL_OMP_THREAD_NUM=${IAXL_OMP_THREAD_NUM:-$(omp_thread_count "$IAXL_QAT_INSTANCE_NUM" "$IAXL_CPU_ZIP_THREADS" "$IAXL_IAA_INSTANCE_NUM")} || return 1 2>/dev/null || exit 1
 else
     # No zip worker: OpenMP threads only copy raw KV blocks on the host; cap at 4.
     if [[ -z "$IAXL_OMP_THREAD_NUM" ]]; then
@@ -133,8 +136,13 @@ else
     fi
     export IAXL_OMP_THREAD_NUM
 fi
-export OMP_NUM_THREADS=$IAXL_OMP_THREAD_NUM
-export OMP_THREAD_LIMIT=$IAXL_OMP_THREAD_NUM
+export IAXL_USE_OMP=${IAXL_USE_OMP:-1} # parallel.h runs on OpenMP (1) or iaxl's own thread pool (0), which stays off the OpenMP runtime vLLM and torch share
+if env_truthy "$IAXL_USE_OMP"; then
+    export OMP_NUM_THREADS=$IAXL_OMP_THREAD_NUM
+    export OMP_THREAD_LIMIT=$IAXL_OMP_THREAD_NUM
+else
+    unset OMP_NUM_THREADS OMP_THREAD_LIMIT # Leave OpenMP to vLLM (CPU inference pins one thread per core)
+fi
 export OMP_MAX_ACTIVE_LEVELS=2
 validate_omp_config "$MIN_RANK_CPU_COUNT" || return 1 2>/dev/null || exit 1
 

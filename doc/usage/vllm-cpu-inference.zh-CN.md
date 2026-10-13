@@ -1,0 +1,82 @@
+# 使用 KVShrink 进行 vLLM CPU 推理
+
+[English](vllm-cpu-inference.en.md)
+
+本文介绍 vLLM 在 CPU 上推理、KVShrink 使用 Intel QAT 或 IAA 压缩 KV cache 时，如何配置线程和 CPU 绑核。容器中需要安装 CPU 版 vLLM（`VLLM_TARGET_DEVICE=cpu`）。设计原理见 [KV Zip 设计](../design/kv-zip.md)。
+
+## 1. CPU 绑核
+
+两个变量把每个 rank 的 CPU 分给 vLLM 和 IAXL：
+
+| 变量 | 使用者 | 线程 |
+| --- | --- | --- |
+| `VLLM_CPU_OMP_THREADS_BIND` | vLLM | OpenMP 推理线程，每个 CPU 一个 |
+| `KVSHRINK_CPU_OMP_THREADS_BIND` | IAXL | `OMP-Main`、`POOL-<n>`、`H2D`、`D2H` 等 IAXL 线程 |
+
+- **格式**：两个变量都是每个 rank 一项，用 `|` 分隔。每项是一个 CPU 列表，例如 `0-61` 或 `0-7,16`。
+- **rank 顺序**：第 `r` 项对应全局 rank `r = dp_rank × TP_SIZE + tp_rank`，因此每个变量需要 `TP_SIZE × DP_SIZE` 项。
+- **默认值**：`KVSHRINK_CPU_OMP_THREADS_BIND` 默认等于 `VLLM_CPU_OMP_THREADS_BIND`。这时 IAXL 线程和推理线程共用同一批核，所以 CPU 推理时要显式设置它。
+- **启动时**：connector 把本 rank 对应的项导出为 `IAXL_CPU_OMP_THREADS_BIND`，IAXL 的所有线程都绑定到这些 CPU 上。
+
+选择 CPU 时：
+
+- 同一个 rank 的 vLLM 项和 IAXL 项不能有重叠。
+- 两项放在同一个 NUMA 节点上，该 rank 的 QAT 设备（`KVSHRINK_QAT_DEVICES`）也选在这个节点。
+- 每个物理核只用一个逻辑 CPU，可以用 `lscpu -e=CPU,CORE,NODE` 查看对应关系。
+- 每个 rank 给 IAXL 的 CPU 数量不少于 `IAXL_OMP_THREAD_NUM`。
+
+## 2. 线程配置
+
+| 变量 | 推荐值 | 作用 |
+| --- | --- | --- |
+| `IAXL_USE_OMP` | `0` | IAXL 不用 OpenMP，改用自己的线程池，OpenMP 留给 vLLM。此时 `setvars.sh` 会 unset `OMP_NUM_THREADS` 和 `OMP_THREAD_LIMIT`。 |
+| `IAXL_OMP_THREAD_NUM` | `1` 或 `2` | 驱动压缩 worker 的线程数。一个线程就能让多个 QAT/IAA 实例保持忙碌。取值范围是 1 到 worker 数。 |
+| `IAXL_CPU_ZIP_ENABLE` | `0` | 不占用 CPU 核跑 zlib，由 QAT 和 IAA 压缩。 |
+| `IAXL_QAT_ZIP_ENABLE`、`IAXL_IAA_ZIP_ENABLE` | 有哪种加速器就设为 `1` | worker 数为 `IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM`，`setvars.sh` 会打印这两个值。 |
+
+## 3. 示例
+
+下面的例子在两个 NUMA 节点上运行两个 rank：节点 0 是 CPU 0-63，节点 1 是 CPU 64-127，每个物理核一个逻辑 CPU。
+
+```bash
+./start.sh
+
+# 在 start.sh 打开的容器 shell 中执行
+export TP_SIZE=2
+export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"       # vLLM 推理
+export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # IAXL 线程
+export KVSHRINK_QAT_DEVICES="0,1|2,3"                # 每个 rank 所在 NUMA 节点上的 QAT 设备
+export IAXL_USE_OMP=0
+export IAXL_CPU_ZIP_ENABLE=0
+export IAXL_OMP_THREAD_NUM=2
+
+./examples/kvshrink-vllm-serve.sh
+```
+
+该脚本会 source `setvars.sh`，并按照 vLLM CPU 后端的推荐预加载 libiomp5 和 libtcmalloc。
+
+## 4. 验证
+
+- **`setvars.sh` 输出**：检查 `VLLM_CPU_OMP_THREADS_BIND`、`KVSHRINK_CPU_OMP_THREADS_BIND`、`IAXL_OMP_THREAD_NUM` 和 `IAXL_USE_OMP=0`。
+- **vLLM 日志**：每个 rank 会打印 `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` 和 `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`。
+- **线程绑核**：处理完第一个请求后运行下面的命令。IAXL 线程（`OMP-Main`、`POOL-*`、`H2D`、`D2H`）列出的 CPU 应当只有本 rank 在 `KVSHRINK_CPU_OMP_THREADS_BIND` 中的那一项。
+
+  ```bash
+  for f in $(grep -l "^OMP-Main$" /proc/[0-9]*/task/*/comm); do
+      pid=$(cut -d/ -f3 <<<"$f"); echo "== pid $pid"
+      for t in /proc/$pid/task/*; do
+          echo "$(cat $t/comm) $(grep Cpus_allowed_list $t/status | cut -f2)"
+      done | sort | uniq -c
+  done
+  ```
+
+## 5. 常见问题
+
+| 报错 | 处理 |
+| --- | --- |
+| `KVSHRINK_CPU_OMP_THREADS_BIND has N entries, but rank is R` | 每个 rank 提供一项，共 `TP_SIZE × DP_SIZE` 项。 |
+| `invalid IAXL_CPU_OMP_THREADS_BIND` | 某一项不是合法的 CPU 列表。 |
+| `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | 列出的 CPU 进程都用不了，例如不在容器的 cpuset 内。 |
+| `IAXL_OMP_THREAD_NUM must be between 1 and ...` | 调小 `IAXL_OMP_THREAD_NUM`，或启用更多 QAT/IAA 实例。 |
+| `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | `VLLM_CPU_OMP_THREADS_BIND` 中最小的一项 CPU 太少。调小 `IAXL_RESERVED_CPU_NUM` 或 `IAXL_OMP_THREAD_NUM`。 |
+| vLLM 警告 `LD_PRELOAD` 中没有 libiomp 或 libtcmalloc | 用 `examples/kvshrink-vllm-serve.sh` 启动 vLLM。 |
