@@ -330,7 +330,7 @@ int dsa_memcpy(void *dest, const void *src, size_t n) {
         memset(&desc, 0, sizeof(desc));
         desc.opcode = DSA_OPCODE_MEMMOVE;
 
-        desc.flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+        desc.flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CC;
         desc.completion_addr = (uint64_t)&comp;
         desc.src_addr = (uint64_t)src + done;
         desc.dst_addr = (uint64_t)dest + done;
@@ -380,7 +380,7 @@ static int dsa_submit_batch(void *portal, struct dsa_hw_desc *sub,
     for (j = 0; j < cnt; j++) {
         sub[j].opcode = DSA_OPCODE_MEMMOVE;
 
-        sub[j].flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+        sub[j].flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CC;
         sub[j].completion_addr = (uint64_t)&comp[j];
         sub[j].src_addr = (uint64_t)src[first + j];
         sub[j].dst_addr = (uint64_t)dest[first + j];
