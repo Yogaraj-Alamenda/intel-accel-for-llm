@@ -11,6 +11,10 @@
 // tensors). PUT gathers a view straight into the codec's staging buffer and GET scatters the
 // codec's output straight back into the view, so no intermediate host buffer is touched.
 //
+// CPU builds with IAXL_DSA_MEMCPY_ENABLE=1 hand those plain copies to Intel DSA: raw blocks as one
+// batch, and the per-block QAT/IAA staging/scatter copies asynchronously, so a polling thread keeps
+// its other slots busy while DSA moves the bytes.
+//
 // QAT and CPU streams are mutually compatible, IAA streams are compatible with neither, so a
 // compressed block records in its header whether IAA produced it and decompression only hands it
 // to a backend that can decode it.
@@ -21,6 +25,7 @@
 #include <atomic>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -36,6 +41,14 @@
 #include "data_shuffle.h"
 #include "lossy.h"
 #include "kv_zip.h"
+
+#ifdef DSA_MEMCPY_SUPPORT
+#include "dsa_memcpy.h"
+#endif
+
+#define DSA_ALIGN 8u
+// Per-block copies below this stay on memcpy: the descriptor round trip would dominate.
+#define DSA_ASYNC_MIN_BYTES 4096u
 
 // Header word 0 is the payload length with two flag bits: IAA produced the stream (it cannot be
 // decoded by QAT/CPU), and the block was byte-plane shuffled before compression. GET must obey
@@ -87,9 +100,148 @@ static void ensure_zip_init() {
 // ---------------------------------------------------------------------------------------------
 // Segment copies
 
+#ifdef DSA_MEMCPY_SUPPORT
+static std::atomic<bool> g_dsa_disabled{false};
+
+static void dsa_disable(const char *why) {
+    g_dsa_disabled.store(true, std::memory_order_relaxed);
+    static std::once_flag warned;
+    std::call_once(warned, [why] {
+        fprintf(stderr, "[kv_zip] WARNING: %s; falling back to CPU memcpy for the rest of this "
+                        "process\n", why);
+    });
+}
+
+static bool dsa_copy_segments(const std::vector<CopySegment> &segments) {
+    if (g_dsa_disabled.load(std::memory_order_relaxed))
+        return false;
+    for (const auto &s : segments) {
+        if ((reinterpret_cast<uintptr_t>(s.dst) | reinterpret_cast<uintptr_t>(s.src) | s.n) &
+            (DSA_ALIGN - 1))
+            return false;
+    }
+    std::vector<void *> dst(segments.size());
+    std::vector<const void *> src(segments.size());
+    std::vector<size_t> n(segments.size());
+    for (size_t i = 0; i < segments.size(); i++) {
+        dst[i] = segments[i].dst;
+        src[i] = segments[i].src;
+        n[i] = segments[i].n;
+    }
+    if (dsa_memcpy_batch(dst.data(), src.data(), n.data(), segments.size()) == 0) {
+        static std::once_flag noted;
+        std::call_once(noted, [] {
+            fprintf(stderr, "[kv_zip] segment copies: using Intel DSA (IAXL_DSA_WQS=%s)\n",
+                    envs.IAXL_DSA_WQS());
+        });
+        return true;
+    }
+    // A failed batch may have partially copied; the caller redoes the whole batch with memcpy.
+    dsa_disable("DSA memcpy failed");
+    return false;
+}
+#endif
+
+static bool dsa_async_enabled() {
+#ifdef DSA_MEMCPY_SUPPORT
+    return envs.IAXL_DSA_MEMCPY_ENABLE && !g_dsa_disabled.load(std::memory_order_relaxed);
+#else
+    return false;
+#endif
+}
+
+// Copies owned by one codec slot. DSA moves the bytes while the polling thread keeps the other
+// slots busy; anything DSA cannot take is copied on the CPU before start() returns. Movable but
+// not copyable: in-flight completion records live in the heap buffer of active_, which a move
+// hands over intact.
+class SlotCopies {
+  public:
+    SlotCopies() = default;
+    SlotCopies(SlotCopies &&) = default;
+    SlotCopies &operator=(SlotCopies &&) = default;
+    SlotCopies(const SlotCopies &) = delete;
+    SlotCopies &operator=(const SlotCopies &) = delete;
+
+    void start(const std::vector<CopySegment> &segments) {
+        IAXL_CHECK(active_.empty(), "kv_zip: slot copies restarted while in flight");
+#ifdef DSA_MEMCPY_SUPPORT
+        // Reserved up front: a reallocation would move completion records the engine writes to.
+        active_.reserve(segments.size());
+        for (const auto &s : segments) {
+            if (s.n >= DSA_ASYNC_MIN_BYTES && dsa_async_enabled()) {
+                Copy &c = active_.emplace_back();
+                c.seg = s;
+                const int queued = dsa_copy_submit(&c.job, s.dst, s.src, s.n);
+                if (queued == 0) {
+                    static std::once_flag noted;
+                    std::call_once(noted, [] {
+                        fprintf(stderr, "[kv_zip] codec staging copies: using Intel DSA\n");
+                    });
+                    continue;
+                }
+                active_.pop_back();
+                if (queued < 0)
+                    dsa_disable("DSA is unavailable for async copies");
+            }
+            memcpy(s.dst, s.src, s.n);
+        }
+#else
+        for (const auto &s : segments)
+            memcpy(s.dst, s.src, s.n);
+#endif
+    }
+
+    // True once every copy has landed; failed DSA copies are redone on the CPU.
+    bool done() {
+#ifdef DSA_MEMCPY_SUPPORT
+        bool all = true;
+        for (auto &c : active_) {
+            if (c.landed)
+                continue;
+            const int state = dsa_copy_poll(&c.job);
+            if (state == 0) {
+                all = false;
+                continue;
+            }
+            if (state < 0) {
+                memcpy(c.seg.dst, c.seg.src, c.seg.n);
+                dsa_disable("DSA async copy failed");
+            }
+            c.landed = true;
+        }
+        if (all)
+            active_.clear();
+        return all;
+#else
+        return true;
+#endif
+    }
+
+  private:
+#ifdef DSA_MEMCPY_SUPPORT
+    struct Copy {
+        dsa_copy_job job{};
+        CopySegment seg{};
+        bool landed = false;
+    };
+    std::vector<Copy> active_;
+#else
+    std::vector<int> active_;
+#endif
+};
+
 void copy_segments(const std::vector<CopySegment> &segments, bool parallel) {
     if (segments.empty())
         return;
+#ifdef DSA_MEMCPY_SUPPORT
+    if (envs.IAXL_DSA_MEMCPY_ENABLE) {
+        size_t total = 0;
+        for (const auto &s : segments)
+            total += s.n;
+        if (total >= envs.IAXL_DSA_MEMCPY_MIN_BYTES && dsa_copy_segments(segments))
+            return;
+    }
+#endif
     const size_t n = segments.size();
     if (parallel && n > 1) {
         parallel::parallel_for(n, [&](size_t i) {
@@ -179,8 +331,11 @@ static void shuffle_xfer(const ChunkView &view, char *flat, bool to_view) {
 // ---------------------------------------------------------------------------------------------
 // Worker pipeline
 
-template <class Next, class Submit, class Complete>
-static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) {
+// Each lane moves Staging (input copies) -> Codec -> Unstaging (output copies) -> next item.
+// prepare/complete may start SlotCopies, so a thread keeps its other lanes busy while DSA copies.
+template <class Next, class Prepare, class Launch, class Complete>
+static void zip_pipeline(Next &&get_next, Prepare &&prepare, Launch &&launch,
+                         Complete &&complete) {
     ensure_zip_init();
     const int qat_workers = envs.IAXL_QAT_ZIP_ENABLE ? envs.IAXL_QAT_INSTANCE_NUM : 0;
     const int iaa_workers = envs.IAXL_IAA_ZIP_ENABLE ? envs.IAXL_IAA_INSTANCE_NUM : 0;
@@ -192,14 +347,53 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
                "kv_zip: IAXL_IAA_INSTANCE_NUM exceeds available IAA instances");
     const int threads = std::min(envs.IAXL_OMP_THREAD_NUM, worker_count);
 
+    enum class Stage { Staging, Codec, Unstaging };
+    struct Lane {
+        ZipBackend backend;
+        int slot;
+        size_t item;
+        Stage stage;
+        SlotCopies copies;
+    };
+
+    // Runs a lane forward until it has to wait; returns true once it has nothing left to claim.
+    auto advance = [&](Lane &lane) {
+        for (;;) {
+            switch (lane.stage) {
+            case Stage::Staging:
+                if (!lane.copies.done())
+                    return false;
+                launch(lane.backend, lane.slot, lane.item);
+                lane.stage = Stage::Codec;
+                break;
+            case Stage::Codec: {
+                void *out;
+                int out_len;
+                const int status =
+                    ops(lane.backend).wait(lane.slot, &out, &out_len, /*non_block=*/1);
+                if (status == IAXL_ZIP_PENDING)
+                    return false;
+                IAXL_CHECK(status == 0, "kv_zip: zip wait failed");
+                complete(lane.backend, lane.item, out, out_len, lane.copies);
+                lane.stage = Stage::Unstaging;
+                break;
+            }
+            case Stage::Unstaging:
+                if (!lane.copies.done())
+                    return false;
+                lane.item = get_next(lane.backend);
+                if (lane.item == kNoTask)
+                    return true;
+                prepare(lane.backend, lane.slot, lane.item, lane.copies);
+                lane.stage = Stage::Staging;
+                break;
+            }
+        }
+    };
+
     // Thread `tid` owns workers tid, tid + threads, ..., so each backend instance stays on one
     // thread while the backends are spread across all of them.
     auto drive = [&](int tid) {
-        struct Lane {
-            ZipBackend backend;
-            int slot;
-            size_t item;
-        };
         std::vector<Lane> lanes;
         for (int w = tid; w < worker_count; w += threads) {
             ZipBackend backend = ZipBackend::CPU;
@@ -217,33 +411,20 @@ static void zip_pipeline(Next &&get_next, Submit &&submit, Complete &&complete) 
                 if (i == kNoTask)
                     break;
                 const int slot = (w - first) * depth + k;
-                submit(backend, slot, i);
-                lanes.push_back({backend, slot, i});
+                Lane &lane = lanes.emplace_back(Lane{backend, slot, i, Stage::Staging, {}});
+                prepare(backend, slot, i, lane.copies);
             }
         }
 
         while (!lanes.empty()) {
             for (size_t s = 0; s < lanes.size();) {
-                Lane &lane = lanes[s];
-                void *out;
-                int out_len;
-                const int status =
-                    ops(lane.backend).wait(lane.slot, &out, &out_len, /*non_block=*/1);
-                if (status == IAXL_ZIP_PENDING) {
+                if (!advance(lanes[s])) {
                     s++;
                     continue;
                 }
-                IAXL_CHECK(status == 0, "kv_zip: zip wait failed");
-                complete(lane.backend, lane.item, out, out_len);
-
-                lane.item = get_next(lane.backend);
-                if (lane.item == kNoTask) {
-                    lane = lanes.back();
-                    lanes.pop_back();
-                    continue;
-                }
-                submit(lane.backend, lane.slot, lane.item);
-                s++;
+                if (s + 1 != lanes.size())
+                    lanes[s] = std::move(lanes.back());
+                lanes.pop_back();
             }
         }
     };
@@ -291,7 +472,7 @@ void kv_zip_compress_views(const std::vector<ChunkView> &views, std::vector<char
             const size_t i = next.fetch_add(1, std::memory_order_relaxed);
             return i < n ? i : kNoTask;
         },
-        [&](ZipBackend backend, int slot, size_t i) {
+        [&](ZipBackend backend, int slot, size_t i, SlotCopies &copies) {
             const ChunkView &view = views[i];
             const size_t nb = view.nbytes();
             orig_sizes[i] = nb;
@@ -304,17 +485,26 @@ void kv_zip_compress_views(const std::vector<ChunkView> &views, std::vector<char
             // Stage into the codec's own input buffer so the inference tensor is only ever read.
             if (put_shuffles(view) && fused_shuffle_ok(view) && envs.IAXL_KV_LOSSY_TRUNC == 0) {
                 shuffle_xfer(view, staging, false);
-            } else {
-                std::vector<CopySegment> segments;
-                view_segments(view, staging, true, segments);
-                copy_segments(segments, false);
-                lossy_trunc(staging, nb, view.element_size);
-                data_shuffle(staging, nb, view.is_bf16, data_shuffle_enabled());
+                return;
             }
-            const int status = ops(backend).compress_staged(slot, static_cast<int>(nb));
+            std::vector<CopySegment> segments;
+            view_segments(view, staging, true, segments);
+            // A plain gather can land asynchronously; truncation and shuffle need the bytes now.
+            if (backend != ZipBackend::CPU && !put_shuffles(view) &&
+                envs.IAXL_KV_LOSSY_TRUNC == 0) {
+                copies.start(segments);
+                return;
+            }
+            copy_segments(segments, false);
+            lossy_trunc(staging, nb, view.element_size);
+            data_shuffle(staging, nb, view.is_bf16, data_shuffle_enabled());
+        },
+        [&](ZipBackend backend, int slot, size_t i) {
+            const int status =
+                ops(backend).compress_staged(slot, static_cast<int>(views[i].nbytes()));
             IAXL_CHECK(status == 0, "kv_zip: zip compress failed");
         },
-        [&](ZipBackend backend, size_t i, void *out, int out_len) {
+        [&](ZipBackend backend, size_t i, void *out, int out_len, SlotCopies &) {
             char *buf = static_cast<char *>(malloc(sizeof(int) * 2 + out_len));
             IAXL_CHECK(buf != nullptr, "kv_zip: cache buffer allocation failed");
             pack_header(buf, static_cast<uint32_t>(out_len), backend, orig_sizes[i],
@@ -368,7 +558,8 @@ void kv_zip_decompress_views(const std::vector<const char *> &data_ptrs,
     IAXL_CHECK(other_items.empty() || envs.IAXL_QAT_ZIP_ENABLE || envs.IAXL_CPU_ZIP_ENABLE,
                "kv_zip: batch holds QAT/CPU-compressed blocks but both backends are disabled");
 
-    auto finish = [&](ZipBackend, size_t i, void *out, int out_len) {
+    auto finish = [&](ZipBackend backend, size_t i, void *out, int out_len,
+                      SlotCopies &copies) {
         const ChunkView &view = views[i];
         const size_t nb = view.nbytes();
         IAXL_CHECK(out_len >= 0 && static_cast<size_t>(out_len) == nb,
@@ -384,7 +575,10 @@ void kv_zip_decompress_views(const std::vector<const char *> &data_ptrs,
         data_shuffle(flat, nb, true, shuffled);
         std::vector<CopySegment> segments;
         view_segments(view, flat, false, segments);
-        copy_segments(segments, false);
+        if (backend != ZipBackend::CPU)
+            copies.start(segments);
+        else
+            copy_segments(segments, false);
     };
 
     auto payload_of = [&](size_t i) {
@@ -392,6 +586,8 @@ void kv_zip_decompress_views(const std::vector<const char *> &data_ptrs,
         return std::make_pair(const_cast<char *>(data_ptrs[i]) + sizeof(int) * 2,
                               static_cast<int>(encoded & KV_ZIP_LEN_MASK));
     };
+    // Items whose payload prepare copied into the slot's device input buffer.
+    std::vector<char> staged(n, 0);
 
     std::atomic<size_t> iaa_next{0}, other_next{0};
     zip_pipeline(
@@ -402,9 +598,20 @@ void kv_zip_decompress_views(const std::vector<const char *> &data_ptrs,
             const size_t k = cursor.fetch_add(1, std::memory_order_relaxed);
             return k < items.size() ? items[k] : kNoTask;
         },
+        [&](ZipBackend backend, int slot, size_t i, SlotCopies &copies) {
+            auto [payload, payload_len] = payload_of(i);
+            // The CPU backend inflates straight from the cache; devices need their DMA buffer.
+            if (backend == ZipBackend::CPU || payload_len > ops(backend).src_cap())
+                return;
+            char *in = static_cast<char *>(ops(backend).input_buf(slot));
+            IAXL_CHECK(in != nullptr, "kv_zip: backend has no staging buffer for slot");
+            copies.start({{in, payload, static_cast<size_t>(payload_len)}});
+            staged[i] = 1;
+        },
         [&](ZipBackend backend, int slot, size_t i) {
             auto [payload, payload_len] = payload_of(i);
-            const int status = ops(backend).decompress(slot, payload, payload_len);
+            void *src = staged[i] ? ops(backend).input_buf(slot) : payload;
+            const int status = ops(backend).decompress(slot, src, payload_len);
             IAXL_CHECK(status == 0, "kv_zip: zip decompress failed");
         },
         finish);

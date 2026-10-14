@@ -149,9 +149,11 @@ fi
 export OMP_MAX_ACTIVE_LEVELS=2
 validate_omp_config "$MIN_RANK_CPU_COUNT" || return 1 2>/dev/null || exit 1
 
-# ---- Intel DSA (host<->device copy accelerator, CUDA only) ------------------
+# ---- Intel DSA (host<->device copies on CUDA, host copies on CPU) -----------
 export IAXL_DSA_GD_RESET_ON_DESTROY=${IAXL_DSA_GD_RESET_ON_DESTROY:-0} # Large BAR with stable tensor VAs can keep this off for better performance (0/1)
 export IAXL_DSA_WQS=${IAXL_DSA_WQS:-wq0.0}                             # Comma/space separated DSA work-queue names
+export IAXL_DSA_MEMCPY_ENABLE=${IAXL_DSA_MEMCPY_ENABLE:-0}             # DEVICE=cpu: copy KV blocks host-to-host with DSA (0/1)
+export IAXL_DSA_MEMCPY_MIN_BYTES=${IAXL_DSA_MEMCPY_MIN_BYTES:-1048576} # DEVICE=cpu: raw-block batches below this stay on memcpy
 
 # ---- Debug / profiling ------------------------------------------------------
 export PYTHONOPTIMIZE=0                                 # Keep Python assert statements enabled

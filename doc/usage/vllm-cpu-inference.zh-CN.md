@@ -6,7 +6,7 @@
 
 ## 1. 构建
 
-`DEVICE=cpu` 构建与 GPU 推理使用相同的 `KVStore`、压缩编解码和 persist/evict API。它不需要 CUDA、SYCL、GDRCopy 或 NIXL，因此不支持 DSA 传输和 RDMA（`remote_pool`）。`docker/Dockerfile.dev` 会构建 GPU 依赖（UCX、NIXL），因此也可以直接在已安装 CPU 版 vLLM 的环境中构建。除 Python 构建依赖外，还需要 C/C++ 编译器、CMake、NASM（QPL 依赖需要，即使不启用 IAA）、SQLite 和 zlib。
+`DEVICE=cpu` 构建与 GPU 推理使用相同的 `KVStore`、压缩编解码和 persist/evict API。它不需要 CUDA、SYCL、GDRCopy 或 NIXL，因此不支持 DSA + GDRCopy 传输和 RDMA（`remote_pool`）；但仍可用 Intel DSA 完成主机内存之间的 block 拷贝（见[缓存配置](#4-缓存配置)）。`docker/Dockerfile.dev` 会构建 GPU 依赖（UCX、NIXL），因此也可以直接在已安装 CPU 版 vLLM 的环境中构建。除 Python 构建依赖外，还需要 C/C++ 编译器、CMake、NASM（QPL 依赖需要，即使不启用 IAA）、SQLite 和 zlib。
 
 ```bash
 python -m pip install -r requirements.txt
@@ -56,6 +56,9 @@ out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包
 | `MAX_MODEL_LEN` | `--max-model-len`（默认 `32765`）。CPU KV cache 放不下一个满长度请求时调小。 |
 | `BLOCK_SIZE` | `--block-size`（默认 `16`）。CPU 上每层一个 KV block 为 `2 × num_kv_heads × block_size × head_size × dtype_bytes` 字节，必须不超过 `IAXL_ZIP_SRC_CAP`，压缩后不超过 `IAXL_ZIP_DST_CAP`（默认都是 256 KiB）。 |
 | `IAXL_KV_DATA_SHUFFLE`、`IAXL_KV_LOSSY_TRUNC` | 编解码直接从 vLLM 的 KV tensor 读取 block，并直接写回，两个选项都不会引入中转拷贝。`setvars.sh` 默认开启字节重排：它能提升压缩率；对 BF16，重排在拷贝到编解码缓冲区时完成，在把输出拷回时还原。 |
+| `IAXL_DSA_MEMCPY_ENABLE` | 设为 `1` 时由 Intel DSA 完成普通的 block 拷贝（默认关闭）：未压缩的 raw block 双向拷贝（包括不压缩的层）作为一个 DSA batch 提交；QAT/IAA 每个 block 的拷贝（压缩数据拷入设备缓冲区、gather 到设备缓冲区、scatter 回 KV tensor）与编解码异步进行。字节重排的 block 仍由 CPU 变换。需要用户态 DSA work queue（`/dev/dsa/wqX.Y`，见 `tools/setup_dsa.sh`）；DSA 第一次失败时进程只告警一次，之后一直使用 `memcpy`。 |
+| `IAXL_DSA_WQS`、`KVSHRINK_DSA_DEVICES` | 本进程使用的 DSA work queue；或每个 rank 一项、用 `\|` 分隔（例如 `wq0.0\|wq2.0`），connector 会把对应项导出为该 rank 的 `IAXL_DSA_WQS`。 |
+| `IAXL_DSA_MEMCPY_MIN_BYTES` | 小于该值（默认 1 MiB）的 raw block batch 仍用 `memcpy`，因为 DSA 往返开销会超过拷贝本身。 |
 
 ## 5. 示例
 
@@ -81,7 +84,7 @@ export IAXL_OMP_THREAD_NUM=2
 ## 6. 验证
 
 - **`setvars.sh` 输出**：检查 `VLLM_CPU_OMP_THREADS_BIND`、`KVSHRINK_CPU_OMP_THREADS_BIND`、`IAXL_OMP_THREAD_NUM` 和 `IAXL_USE_OMP=0`。
-- **vLLM 日志**：每个 rank 会打印 `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` 和 `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`。
+- **vLLM 日志**：每个 rank 会打印 `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` 和 `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`。设置 `IAXL_DSA_MEMCPY_ENABLE=1` 时，config 行显示 `dsa_memcpy=ON`，首次 DSA 拷贝会打印 `[kv_zip] segment copies: using Intel DSA` 或 `[kv_zip] codec staging copies: using Intel DSA`。
 - **线程绑核**：处理完第一个请求后运行下面的命令。IAXL 线程（`OMP-Main`、`POOL-*`、`H2D`、`D2H`）列出的 CPU 应当只有本 rank 在 `KVSHRINK_CPU_OMP_THREADS_BIND` 中的那一项。
 
   ```bash
@@ -103,4 +106,5 @@ export IAXL_OMP_THREAD_NUM=2
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | 调小 `IAXL_OMP_THREAD_NUM`，或启用更多 QAT/IAA 实例。 |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | `VLLM_CPU_OMP_THREADS_BIND` 中最小的一项 CPU 太少。调小 `IAXL_RESERVED_CPU_NUM` 或 `IAXL_OMP_THREAD_NUM`。 |
 | vLLM 警告 `LD_PRELOAD` 中没有 libiomp 或 libtcmalloc | 用 `examples/kvshrink-vllm-serve.sh` 启动 vLLM。 |
+| `[kv_zip] WARNING: ... falling back to CPU memcpy for the rest of this process` | `IAXL_DSA_WQS` 中的 DSA work queue 不存在、不是用户态，或拷贝失败。检查 `/dev/dsa/` 和 `tools/setup_dsa.sh`，或设置 `IAXL_DSA_MEMCPY_ENABLE=0`。 |
 | `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | 跨节点 KV cache 复用需要 CUDA 或 XPU 构建。 |

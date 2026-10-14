@@ -153,6 +153,8 @@ source setvars.sh
 
 vLLM's CPU backend also recommends preloading libiomp5 and libtcmalloc through `LD_PRELOAD`.
 
+With `IAXL_DSA_MEMCPY_ENABLE=1`, CPU builds move the plain copies around the codec to Intel DSA. Each worker slot then runs as a stage machine: staging copies, codec, scatter copies. The polling thread starts the copies of one slot asynchronously and keeps polling its other slots until they land, so DSA, QAT and IAA all stay busy from the same thread. Raw blocks are copied as one DSA batch when the batch reaches `IAXL_DSA_MEMCPY_MIN_BYTES`. Copies that DSA cannot take (unaligned, too small, or with a full work queue) run on the CPU, and the first DSA failure switches the process to `memcpy` for good. With `IAXL_USE_OMP=0`, a raw-block DSA batch is driven from the calling thread through the first work queue, so iaxl still starts no OpenMP region.
+
 ## Configuration
 
 | Variable | Meaning |
@@ -164,5 +166,7 @@ vLLM's CPU backend also recommends preloading libiomp5 and libtcmalloc through `
 | `IAXL_USE_OMP` | `1` for OpenMP, `0` for `ThreadPool`; `setvars.sh` defaults to `0` with `DEVICE=cpu` |
 | `IAXL_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads in this process |
 | `KVSHRINK_CPU_OMP_THREADS_BIND` | CPUs for iaxl's threads for each rank, separated by `\|`. Defaults to `VLLM_CPU_OMP_THREADS_BIND`. |
+| `IAXL_DSA_MEMCPY_ENABLE` | `DEVICE=cpu` only: copy blocks with Intel DSA through `IAXL_DSA_WQS` (default `0`) |
+| `IAXL_DSA_MEMCPY_MIN_BYTES` | Smallest raw-block batch handed to DSA (default 1 MiB) |
 
 `setvars.sh` derives the defaults, and `tools/auto_config.sh` rejects inconsistent combinations.

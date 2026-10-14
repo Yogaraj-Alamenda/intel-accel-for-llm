@@ -77,6 +77,18 @@ entry. Without this the codec pollers preempt inference OpenMP threads and the c
 surfaces as OpenMP barrier spin, not as codec time. See [KV Zip](kv-zip.md) for the
 thread pool and the thread count.
 
+**Intel DSA for host copies.** CPU builds compile the host-only `dsa_memcpy` (no
+GDRCopy). With `IAXL_DSA_MEMCPY_ENABLE=1`, raw blocks in both directions are issued
+as a DSA batch through the work queues in `IAXL_DSA_WQS` using user virtual addresses
+(8-byte aligned segments, batches of at least `IAXL_DSA_MEMCPY_MIN_BYTES`). QAT/IAA
+slots additionally run as a stage machine (staging copies, codec, scatter copies)
+whose per-block copies (payload into the device input buffer, unshuffled gather into
+it, and unshuffled scatter into the KV tensor) are submitted to DSA asynchronously,
+so a polling thread keeps its other slots busy while DSA moves the bytes. Async copies
+hold a per-WQ credit because a dedicated WQ drops submissions beyond its size. On the
+first failure the process warns once and stays on `memcpy`. Shuffled blocks are
+transformed on the CPU in the same pass as the gather/scatter.
+
 The payload format, layerwise waits, and storage
 lifecycle are shared with the GPU path. Both `IAXL_QATLIB` modes (`oot`, `intree`)
 work for the CPU build. `DEVICE=cpu` builds

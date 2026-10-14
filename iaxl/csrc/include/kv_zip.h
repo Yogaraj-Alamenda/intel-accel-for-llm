@@ -28,7 +28,8 @@ struct CopySegment {
     size_t n;
 };
 
-// Copies every segment with memcpy, spread over the codec team when `parallel`.
+// Copies every segment, through Intel DSA when IAXL_DSA_MEMCPY_ENABLE is set and the hardware
+// accepts the batch, otherwise with memcpy (spread over the codec team when `parallel`).
 void copy_segments(const std::vector<CopySegment> &segments, bool parallel);
 
 // Compresses each view straight from the inference tensor into the codec staging buffer and

@@ -6,7 +6,7 @@ This guide shows how to configure threads and CPU binding when vLLM runs inferen
 
 ## 1. Build
 
-A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available. `docker/Dockerfile.dev` builds GPU dependencies (UCX, NIXL), so the build may also be run directly in an environment that has CPU vLLM installed. Besides the Python build requirements, it needs a C/C++ compiler, CMake, NASM (for the QPL dependency, even with IAA disabled), SQLite, and zlib.
+A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA + GDRCopy transfers and RDMA (`remote_pool`) are not available; Intel DSA can still take over host-to-host block copies (see [Cache Settings](#4-cache-settings)). `docker/Dockerfile.dev` builds GPU dependencies (UCX, NIXL), so the build may also be run directly in an environment that has CPU vLLM installed. Besides the Python build requirements, it needs a C/C++ compiler, CMake, NASM (for the QPL dependency, even with IAA disabled), SQLite, and zlib.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -56,6 +56,9 @@ When choosing CPUs:
 | `MAX_MODEL_LEN` | `--max-model-len` (default `32765`). Lower it when the CPU KV cache cannot hold one full-length request. |
 | `BLOCK_SIZE` | `--block-size` (default `16`). A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 256 KiB by default). |
 | `IAXL_KV_DATA_SHUFFLE`, `IAXL_KV_LOSSY_TRUNC` | The codec reads blocks straight from the vLLM KV tensor and writes them straight back, so neither setting adds a staging copy. `setvars.sh` enables shuffle by default: it improves the compression ratio, and for BF16 it is applied while the block is copied into the codec buffer and undone while the output is copied back. |
+| `IAXL_DSA_MEMCPY_ENABLE` | `1` moves plain block copies to Intel DSA (off by default): raw (uncompressed) blocks in both directions, including layers that bypass compression, as one DSA batch, and the per-block QAT/IAA copies (compressed payload into the device buffer, gather into it, scatter back into the KV tensor), which run asynchronously next to the codec. Byte-shuffled blocks are still transformed on the CPU. Needs a user-mode DSA work queue (`/dev/dsa/wqX.Y`, see `tools/setup_dsa.sh`); on the first DSA failure the process warns once and uses `memcpy` from then on. |
+| `IAXL_DSA_WQS`, `KVSHRINK_DSA_DEVICES` | DSA work queues for the process, or one `\|`-separated entry per rank (for example `wq0.0\|wq2.0`), which the connector exports as each rank's `IAXL_DSA_WQS`. |
+| `IAXL_DSA_MEMCPY_MIN_BYTES` | Raw-block batches smaller than this (default 1 MiB) stay on `memcpy`, where the DSA round trip would cost more than the copy. |
 
 ## 5. Example
 
@@ -81,7 +84,7 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 ## 6. Verification
 
 - **`setvars.sh` output:** check `VLLM_CPU_OMP_THREADS_BIND`, `KVSHRINK_CPU_OMP_THREADS_BIND`, `IAXL_OMP_THREAD_NUM`, and `IAXL_USE_OMP=0`.
-- **vLLM log:** each rank prints `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` and `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`.
+- **vLLM log:** each rank prints `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` and `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`. With `IAXL_DSA_MEMCPY_ENABLE=1` the config line shows `dsa_memcpy=ON`, and the first DSA copies log `[kv_zip] segment copies: using Intel DSA` or `[kv_zip] codec staging copies: using Intel DSA`.
 - **Thread affinity:** after the first request, run the command below. IAXL threads (`OMP-Main`, `POOL-*`, `H2D`, `D2H`) should only list the rank's `KVSHRINK_CPU_OMP_THREADS_BIND` entry.
 
   ```bash
@@ -103,4 +106,5 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | Lower `IAXL_OMP_THREAD_NUM`, or enable more QAT/IAA instances. |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | The smallest `VLLM_CPU_OMP_THREADS_BIND` entry is too small. Lower `IAXL_RESERVED_CPU_NUM` or `IAXL_OMP_THREAD_NUM`. |
 | vLLM warns that libiomp or libtcmalloc is not in `LD_PRELOAD` | Start vLLM with `examples/kvshrink-vllm-serve.sh`. |
+| `[kv_zip] WARNING: ... falling back to CPU memcpy for the rest of this process` | The DSA work queue in `IAXL_DSA_WQS` is missing, not user-mode, or failed a copy. Check `/dev/dsa/` and `tools/setup_dsa.sh`, or set `IAXL_DSA_MEMCPY_ENABLE=0`. |
 | `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | Cross-node KV cache reuse needs a CUDA or XPU build. |
