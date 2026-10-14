@@ -78,8 +78,10 @@ Every stored block starts with an 8-byte header in front of its payload.
 
 | Word | Content |
 | --- | --- |
-| 0 | Payload length; bit 31 is set when IAA produced the stream |
+| 0 | Payload length; bit 31 is set when IAA produced the stream, bit 30 when the block was byte-shuffled before compression |
 | 1 | Original byte size; `0` marks a raw (uncompressed) block |
+
+Decompression undoes the shuffle only when bit 30 is set, whatever the current `IAXL_KV_DATA_SHUFFLE`, so a persisted cache stays readable after the setting changes. The SQLite record stores a cache format version (currently 1) and refuses to open a persisted cache with a different one. A cache written before the version existed is adopted when `IAXL_KV_DATA_SHUFFLE=0`, because its blocks decode the same, and refused otherwise.
 
 Decompression routes each block by its header:
 
