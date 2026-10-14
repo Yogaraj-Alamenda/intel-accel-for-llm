@@ -2,9 +2,21 @@
 
 [简体中文](vllm-cpu-inference.zh-CN.md)
 
-This guide shows how to configure threads and CPU binding when vLLM runs inference on the CPU and KVShrink compresses the KV cache on Intel QAT or IAA. It requires a CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`) in the container. For the design behind these settings, see the [KV Zip design](../design/kv-zip.md).
+This guide shows how to configure threads and CPU binding when vLLM runs inference on the CPU and KVShrink compresses the KV cache on Intel QAT or IAA. It requires a CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`) in the container and IAXL built with `DEVICE=cpu`. For the design behind these settings, see the [KV Zip design](../design/kv-zip.md).
 
-## 1. CPU Binding
+## 1. Build
+
+A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available. `docker/Dockerfile.dev` builds GPU dependencies (UCX, NIXL), so the build may also be run directly in an environment that has CPU vLLM installed. Besides the Python build requirements, it needs a C/C++ compiler, CMake, NASM (for the QPL dependency, even with IAA disabled), SQLite, and zlib.
+
+```bash
+python -m pip install -r requirements.txt
+DEVICE=cpu python -m pip install -e . --no-build-isolation                     # out-of-tree QAT driver package
+DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation # in-tree driver with system qatlib
+```
+
+The out-of-tree build also needs the Boost/Boost Regex, SSL, udev, and netlink development packages. Match the user-space library to the host driver: the out-of-tree runtime expects `/dev/qat_dev_processes`, while qatlib uses the host's VFIO setup.
+
+## 2. CPU Binding
 
 Two variables split each rank's CPUs between vLLM and IAXL:
 
@@ -25,20 +37,32 @@ When choosing CPUs:
 - Use one logical CPU per physical core. `lscpu -e=CPU,CORE,NODE` shows the mapping.
 - Give IAXL at least `IAXL_OMP_THREAD_NUM` CPUs per rank.
 
-## 2. Thread Settings
+## 3. Thread Settings
 
 | Variable | Recommended | Purpose |
 | --- | --- | --- |
-| `IAXL_USE_OMP` | `0` | IAXL runs on its own thread pool instead of OpenMP, which leaves OpenMP to vLLM. `setvars.sh` then unsets `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
+| `IAXL_USE_OMP` | `0` (default with `DEVICE=cpu`) | IAXL runs on its own thread pool instead of OpenMP, which leaves OpenMP to vLLM. `setvars.sh` then unsets `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
 | `IAXL_OMP_THREAD_NUM` | `1` or `2` | Number of threads driving the compression workers. One thread can keep several QAT/IAA instances busy. Valid range: 1 to the worker count. |
 | `IAXL_CPU_ZIP_ENABLE` | `0` | Spends no cores on zlib; QAT and IAA do the compression. |
 | `IAXL_QAT_ZIP_ENABLE`, `IAXL_IAA_ZIP_ENABLE` | `1` for the accelerators you have | The worker count is `IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM`; `setvars.sh` prints both values. |
 
-## 3. Example
+## 4. Cache Settings
+
+`examples/kvshrink-vllm-serve.sh` drops `--gpu-memory-utilization` when `DEVICE=cpu`. These variables commonly need overriding for CPU inference:
+
+| Variable | Purpose |
+| --- | --- |
+| `VLLM_CPU_KVCACHE_SPACE` | Live vLLM KV cache size in GiB. `IAXL_DDR_POOL_SIZE_GB` sizes the compressed KVShrink cache independently. |
+| `MAX_MODEL_LEN` | `--max-model-len` (default `32765`). Lower it when the CPU KV cache cannot hold one full-length request. |
+| `BLOCK_SIZE` | `--block-size` (default `16`). A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 256 KiB by default). |
+| `IAXL_KV_DATA_SHUFFLE`, `IAXL_KV_LOSSY_TRUNC` | With both set to `0`, the codec compresses straight from the vLLM KV blocks and decompresses straight into them, with no staging copies. `setvars.sh` enables shuffle by default. Either one rewrites the codec input, so blocks are staged in scratch buffers. Shuffle improves the compression ratio at the cost of one extra pass over every block. |
+
+## 5. Example
 
 This example runs two ranks on a host where NUMA node 0 has CPUs 0-63 and node 1 has CPUs 64-127, with one logical CPU per core:
 
 ```bash
+export DEVICE=cpu # start.sh passes it into the container, which builds IAXL on entry
 ./start.sh
 
 # In the container shell opened by start.sh
@@ -46,7 +70,6 @@ export TP_SIZE=2
 export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"       # vLLM inference
 export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # IAXL threads
 export KVSHRINK_QAT_DEVICES="0,1|2,3"                # QAT devices on each rank's NUMA node
-export IAXL_USE_OMP=0
 export IAXL_CPU_ZIP_ENABLE=0
 export IAXL_OMP_THREAD_NUM=2
 
@@ -55,7 +78,7 @@ export IAXL_OMP_THREAD_NUM=2
 
 The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as vLLM's CPU backend recommends.
 
-## 4. Verification
+## 6. Verification
 
 - **`setvars.sh` output:** check `VLLM_CPU_OMP_THREADS_BIND`, `KVSHRINK_CPU_OMP_THREADS_BIND`, `IAXL_OMP_THREAD_NUM`, and `IAXL_USE_OMP=0`.
 - **vLLM log:** each rank prints `Bound rank <r>: IAXL_CPU_OMP_THREADS_BIND=<cpus>` and `[iaxl] config: ... omp_threads=2 use_omp=OFF ...`.
@@ -70,7 +93,7 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
   done
   ```
 
-## 5. Troubleshooting
+## 7. Troubleshooting
 
 | Message | Fix |
 | --- | --- |
@@ -80,3 +103,4 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 | `IAXL_OMP_THREAD_NUM must be between 1 and ...` | Lower `IAXL_OMP_THREAD_NUM`, or enable more QAT/IAA instances. |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | The smallest `VLLM_CPU_OMP_THREADS_BIND` entry is too small. Lower `IAXL_RESERVED_CPU_NUM` or `IAXL_OMP_THREAD_NUM`. |
 | vLLM warns that libiomp or libtcmalloc is not in `LD_PRELOAD` | Start vLLM with `examples/kvshrink-vllm-serve.sh`. |
+| `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | Cross-node KV cache reuse needs a CUDA or XPU build. |

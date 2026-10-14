@@ -12,7 +12,7 @@ $TOP_DIR/tools/setup_system.sh
 # =============================================================================
 
 # ---- Build ------------------------------------------------------------------
-export DEVICE=${DEVICE:-cuda}                 # Build backend: cuda | xpu
+export DEVICE=${DEVICE:-cuda}                 # Build backend: cuda | xpu | cpu (vLLM CPU inference)
 export IAXL_CMAKE_ARGS=${IAXL_CMAKE_ARGS:-""} # Extra cmake flags, e.g. "-DENABLE_NVTX=OFF"
 # export IAXL_QATLIB=intree                   # Optional: link system qatlib (in-tree driver); unset = out-of-tree QAT20 package
 export NVIDIA_RUNTIME=${NVIDIA_RUNTIME:-}     # Set to "none" to skip the nvidia docker runtime/gpus args (e.g. on a storage-only node without GPUs)
@@ -136,6 +136,9 @@ else
     fi
     export IAXL_OMP_THREAD_NUM
 fi
+if [[ "$DEVICE" == cpu ]]; then
+    export IAXL_USE_OMP=${IAXL_USE_OMP:-0} # vLLM CPU inference owns the OpenMP runtime
+fi
 export IAXL_USE_OMP=${IAXL_USE_OMP:-1} # parallel.h runs on OpenMP (1) or iaxl's own thread pool (0), which stays off the OpenMP runtime vLLM and torch share
 if env_truthy "$IAXL_USE_OMP"; then
     export OMP_NUM_THREADS=$IAXL_OMP_THREAD_NUM
@@ -200,8 +203,11 @@ case "$DEVICE" in
     xpu)
         DOCKER_RUN_ARGS=("--device" "/dev/dri")
         ;;
+    cpu)
+        DOCKER_RUN_ARGS=()
+        ;;
     *)
-        echo "Unsupported DEVICE: $DEVICE (expected cuda or xpu)" >&2
+        echo "Unsupported DEVICE: $DEVICE (expected cuda, xpu or cpu)" >&2
         return 1 2>/dev/null || exit 1
         ;;
 esac

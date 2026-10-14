@@ -119,6 +119,8 @@ docker exec -it -w "$PWD" iaxl.vllm bash
 ./tests/vllm-test.sh
 ```
 
+如需在 CPU 上运行模型，请以 `DEVICE=cpu` 构建 IAXL，并参考 [vLLM CPU 推理使用指南](doc/usage/vllm-cpu-inference.zh-CN.md)。
+
 ## KVShrink vLLM Benchmark
 
 保持 KVShrink vLLM 服务运行，在第二个容器终端执行 online serving benchmark：

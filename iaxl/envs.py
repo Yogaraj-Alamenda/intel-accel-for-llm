@@ -60,6 +60,8 @@ class Envs:
                 "or set IAXL_KV_COMPRESSION=0"
             )
         self.IAXL_DSA_GD_ENABLE = _bool("IAXL_DSA_GD_ENABLE")
+        self.IAXL_KV_DATA_SHUFFLE = _bool("IAXL_KV_DATA_SHUFFLE")
+        self.IAXL_KV_LOSSY_TRUNC = max(0, _int("IAXL_KV_LOSSY_TRUNC", 0))
         self.IAXL_CACHE_DIR = _str("IAXL_CACHE_DIR", "_data/kvcache")
         self.IAXL_CACHE_STREAM_SYNC_ON_GET = _bool("IAXL_CACHE_STREAM_SYNC_ON_GET")
         self.IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS = max(

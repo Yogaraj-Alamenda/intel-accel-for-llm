@@ -121,6 +121,8 @@ Send a Chat Completions test request:
 ./tests/vllm-test.sh
 ```
 
+To run the model on the CPU, build IAXL with `DEVICE=cpu` and follow the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md).
+
 ## KVShrink vLLM Benchmark
 
 Keep the KVShrink vLLM service running and execute the online serving benchmark in the second container terminal:

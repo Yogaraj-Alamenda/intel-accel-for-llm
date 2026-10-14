@@ -67,6 +67,9 @@ class Context {
                                  int64_t elem_size, int chunk_dim,
                                  GpuTransferDirection direction = GpuTransferDirection::H2D,
                                  const std::string &name = "") {
+#ifdef CPU_SUPPORT
+        TORCH_CHECK(false, "RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link");
+#else
         Context ctx;
         ctx.ops_ = &kv_xfer::rdma_ops();
         ctx.name_ = name;
@@ -86,6 +89,7 @@ class Context {
                                                  outer_block_size);
         PROFILE_SCOPE_FMT("ctx_create_remote(%s)", name.c_str());
         return ctx;
+#endif
     }
 
     void xfer_chunk(const torch::Tensor &cpu_tensor, int64_t chunk_idx);
