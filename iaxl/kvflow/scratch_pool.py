@@ -3,7 +3,8 @@
 
 """Fixed-size pinned scratch pool: one big [num_blocks, *block_shape] tensor
 (IAXL_SCRATCH_POOL_SIZE_GB), blocks handed out as views. No growth: allocate()
-raises once the pool is exhausted.
+raises once the pool is exhausted; KVFlow frees blocks by finishing in-flight
+tasks before allocating.
 
 Each block carries its slot as `tensor.block_idx`, which is also its offset in
 `pool` (register `pool` once for RDMA and use block_idx as the descriptor index).
