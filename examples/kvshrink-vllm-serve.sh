@@ -16,13 +16,21 @@ fi
 device_args=(--gpu-memory-utilization 0.8)
 [[ "$DEVICE" == cpu ]] && device_args=()
 
+# KVSHRINK_CONNECTOR=0 serves plain vLLM with its own prefix cache, as a baseline.
+connector_args=(
+    --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both"}'
+    --no-enable-prefix-caching
+)
+[[ "${KVSHRINK_CONNECTOR:-1}" == 0 ]] && connector_args=()
+
+# Extra arguments are passed on to `vllm serve`.
 vllm serve "$MODEL" \
-    --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both"}' \
+    "${connector_args[@]}" \
     --trust-remote-code \
     "${parallel_args[@]}" \
     "${device_args[@]}" \
     --max-model-len "${MAX_MODEL_LEN:-32765}" \
     --block-size "${BLOCK_SIZE:-16}" \
     --port "${PORT:-8000}" \
-    --no-enable-prefix-caching \
+    "$@" \
     2>&1 | tee log.kvshrink-vllm

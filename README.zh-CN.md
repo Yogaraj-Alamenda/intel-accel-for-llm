@@ -129,6 +129,8 @@ docker exec -it -w "$PWD" iaxl.vllm bash
 ./tests/vllm-benchmark.sh
 ```
 
+vLLM CPU 推理可使用 `benchmark/kvstore/serving_benchmark.sh`：它自行启动服务，用相同的客户端参数比较 `raw`、`sw`、`qat` 三种 KVShrink 配置和 vLLM 自带的 prefix cache，详见 [benchmark/README.md](benchmark/README.md#cpu-serving)。
+
 ## REST API
 
 管理接口默认监听 `localhost:18700`，并将请求转发到各个 rank。

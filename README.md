@@ -131,6 +131,8 @@ Keep the KVShrink vLLM service running and execute the online serving benchmark 
 ./tests/vllm-benchmark.sh
 ```
 
+For vLLM CPU inference, `benchmark/kvstore/serving_benchmark.sh` starts the servers itself and compares the `raw`, `sw` and `qat` KVShrink arms with vLLM's own prefix cache, using the same client settings; see [benchmark/README.md](benchmark/README.md#cpu-serving).
+
 ## REST API
 
 The management API listens on `localhost:18700` by default and forwards requests to each rank.

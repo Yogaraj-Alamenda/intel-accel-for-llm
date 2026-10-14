@@ -79,7 +79,7 @@ export IAXL_OMP_THREAD_NUM=2
 ./examples/kvshrink-vllm-serve.sh
 ```
 
-The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as vLLM's CPU backend recommends.
+The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as vLLM's CPU backend recommends. Extra arguments are passed on to `vllm serve`, and `KVSHRINK_CONNECTOR=0` serves plain vLLM with its own prefix cache as a baseline. To measure throughput, TTFT and TPOT against that baseline, see the [CPU serving benchmark](../../benchmark/README.md#cpu-serving).
 
 ## 6. Verification
 

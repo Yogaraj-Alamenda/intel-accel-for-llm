@@ -79,7 +79,7 @@ export IAXL_OMP_THREAD_NUM=2
 ./examples/kvshrink-vllm-serve.sh
 ```
 
-该脚本会 source `setvars.sh`，并按照 vLLM CPU 后端的推荐预加载 libiomp5 和 libtcmalloc。
+该脚本会 source `setvars.sh`，并按照 vLLM CPU 后端的推荐预加载 libiomp5 和 libtcmalloc。额外的命令行参数会传给 `vllm serve`；设置 `KVSHRINK_CONNECTOR=0` 时运行不带 KVShrink、使用 vLLM 自带 prefix cache 的服务，作为对比基线。吞吐、TTFT 和 TPOT 的对比测试见 [CPU serving benchmark](../../benchmark/README.md#cpu-serving)。
 
 ## 6. 验证
 
