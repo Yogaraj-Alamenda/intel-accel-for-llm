@@ -8,14 +8,16 @@
 | --- | --- |
 | `iaxl/csrc/kv_zip/kv_zip.cpp` | Batch pipeline and block format |
 | `iaxl/csrc/include/parallel.h`, `iaxl/csrc/common/parallel.cpp` | Generic `run_threads`, `parallel_for`, and `ThreadPool` |
-| `iaxl/csrc/{qat,iaa,cpu}_zip/` | Backends with slot-based `compress` / `decompress` / `wait` |
+| `iaxl/csrc/{qat,iaa,cpu}_zip/` | Backends with slot-based `input_buf` / `compress_staged` / `decompress` / `wait` |
+
+Each item is a `ChunkView`: one KV block addressed as strided segments of a tensor. On CPU inference the view points into the vLLM KV tensor itself; on GPU builds it covers a whole CPU scratch tensor. Data moves straight between the view and the backend buffers, with no intermediate host copy.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Ctx["Context: zip_to_mem / unzip_from_mem"] --> Queue["OMP-Main TaskQueue<br/>one batch at a time"]
-    Queue --> Batch["kv_zip_compress_batch / kv_zip_decompress_batch"]
+    Ctx["Context: zip_to_mem(_direct) / unzip_from_mem(_direct)"] --> Queue["OMP-Main TaskQueue<br/>one batch at a time"]
+    Queue --> Batch["kv_zip_compress_views / kv_zip_decompress_views"]
     Batch --> Cursor["Shared item cursor"]
     Batch --> Run["parallel::run_threads<br/>T = min(IAXL_OMP_THREAD_NUM, workers)"]
     Run --> OMP["OpenMP team<br/>IAXL_USE_OMP=1"]
@@ -46,9 +48,9 @@ flowchart LR
 
 Every thread runs the same loop over its slots:
 
-1. **Fill:** claim items from the shared cursor and submit one item per slot. Before submitting, compression applies optional lossy truncation and a BF16 byte shuffle to the data in place.
+1. **Fill:** claim items from the shared cursor and submit one item per slot. Compression gathers the view into the slot's own input buffer and applies optional lossy truncation and the BF16 byte shuffle there, so the source tensor is only read. For BF16 the shuffle is fused into the gather.
 2. **Poll:** go round the in-flight slots calling the backend's `wait(..., non_block=1)`. A result of `IAXL_ZIP_PENDING` moves on to the next slot.
-3. **Refill:** when a request completes, finish its item. For compression this means writing the block header; for decompression it means copying the data out and undoing the shuffle. Then claim the next item and resubmit it into the same slot. A slot is retired once the cursor is empty.
+3. **Refill:** when a request completes, finish its item. For compression this means writing the block header; for decompression it means scattering the output into the view, undoing the shuffle in the same pass. Then claim the next item and resubmit it into the same slot. A slot is retired once the cursor is empty.
 
 Items are claimed as requests complete instead of being split up front, so faster backends automatically take a larger share of the batch. Polling never blocks, which allows `T` to range from 1 up to the worker count. At `T = 1` the caller drives every worker alone.
 
@@ -85,7 +87,7 @@ Decompression undoes the shuffle only when bit 30 is set, whatever the current `
 
 Decompression routes each block by its header:
 
-- Raw blocks are copied with `parallel::parallel_for`.
+- Raw blocks are copied straight into the view with `parallel::parallel_for`.
 - IAA-produced blocks go only to IAA workers.
 - All other blocks go to QAT or CPU workers.
 

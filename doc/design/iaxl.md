@@ -9,7 +9,7 @@ The design keeps model kernels unchanged. Integrations use the Python `KVStore` 
 ## Responsibilities
 
 - Store and retrieve KV blocks by stable hashes.
-- Move fragmented KV blocks between GPU and CPU memory.
+- Move fragmented KV blocks between GPU and CPU memory, or compress them straight from the KV tensor for CPU inference.
 - Compress cached data with Intel QuickAssist Technology (QAT) or Intel In-Memory Analytics Accelerator (IAA), with a compatible CPU DEFLATE backend.
 - Keep hot data in a capacity-bounded DDR cache and optionally persist groups to local storage.
 - Execute transfer, compression, and storage work asynchronously and expose completion through task handles.
@@ -61,13 +61,12 @@ On `PUT`, IAXL copies selected chunks from inference tensors into reusable CPU b
 
 ### CPU Inference
 
-`DEVICE=cpu` keeps the same `Context`/`KVStore` API and codec. The connector views
-each layer's KV cache as `(num_blocks, page)` rows with blocks on axis 0, so each
-block is a contiguous slice of the KV tensor and KVFlow hands those slices to the codec
-directly: PUT compresses from the block and GET decompresses into it, with no
-scratch buffers and no `ScratchPool`. Byte shuffle and lossy truncation rewrite the
-codec input in place, so with either enabled, blocks go
-through scratch buffers with a host `memcpy`. Because on CPU every core the cache
+`DEVICE=cpu` keeps the same `Context`/`KVStore` API and codec, but the codec works on
+the KV tensor directly and no `ScratchPool` is created. Each block is addressed as a
+strided view of the KV tensor, so any layout and dtype works. PUT copies a block
+straight into the codec's input buffer, applying byte shuffle and lossy truncation
+there, so the KV tensor is only read; GET writes the codec output straight back into
+the block, undoing the BF16 shuffle in the same pass. Because on CPU every core the cache
 path occupies is a core taken from the model's own GEMMs, IAXL threads are placed
 explicitly.
 
@@ -99,7 +98,7 @@ Optional byte shuffling improves BF16 compressibility, and independently configu
 
 - **Asynchronous pipeline:** native work queues, plus device streams on GPUs, overlap transfer, compression, and inference where dependencies allow.
 - **Batch-oriented movement:** block fragments are copied in batches; DSA requires an 8-byte-aligned inner copy width, and unsupported layouts automatically use CUDA copies.
-- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the hot path.
+- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the GPU hot path; CPU inference codecs the KV tensor directly and needs no scratch buffers.
 - **Hybrid compression:** QAT and IAA provide the accelerated paths; CPU workers provide additional throughput and a compatible software path.
 - **Selective compression:** latency-sensitive leading layers can bypass compression while later layers remain compressed.
 - **Capacity management:** grouped entries, LRU tracking, and explicit persist/evict operations bound DDR use without changing block identity.

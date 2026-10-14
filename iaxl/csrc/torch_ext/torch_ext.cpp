@@ -83,6 +83,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("cache"), py::arg("label"), py::arg("tensor_key"), py::arg("chunk_labels"),
              py::arg("chunk_indices"), py::arg("cpu_tensors"),
              py::call_guard<py::gil_scoped_release>())
+        .def("zip_to_mem_direct", &Context::zip_to_mem_direct,
+             "CPU build only: compress the selected chunks straight from the inference tensor "
+             "into the cache (async). No scratch tensors; call zip_wait() to block.",
+             py::arg("cache"), py::arg("label"), py::arg("tensor_key"), py::arg("chunk_labels"),
+             py::arg("chunk_indices"), py::arg("compress") = true,
+             py::call_guard<py::gil_scoped_release>())
+        .def("unzip_from_mem_direct", &Context::unzip_from_mem_direct,
+             "CPU build only: decompress straight into the inference tensor (async). "
+             "Call unzip_wait() + xfer_wait() to block until done.",
+             py::arg("cache"), py::arg("label"), py::arg("tensor_key"), py::arg("chunk_labels"),
+             py::arg("chunk_indices"), py::call_guard<py::gil_scoped_release>())
         .def("zip_wait", &Context::zip_wait, "Wait for zip_to_mem to complete",
              py::call_guard<py::gil_scoped_release>())
         .def("zip_is_complete", &Context::zip_is_complete,

@@ -21,6 +21,10 @@ int qat_zip_src_cap(void);
 int qat_zip_compress(int slot, void *src, int len);
 int qat_zip_decompress(int slot, void *src, int len);
 
+// Slot-owned DMA input buffer (src_cap bytes); fill it, then submit with compress_staged.
+void *qat_zip_input_buf(int slot);
+int qat_zip_compress_staged(int slot, int len);
+
 // Returns 0 on completion, -1 on failure, or IAXL_ZIP_PENDING if non_block and still in flight.
 int qat_zip_wait(int slot, void **dest, int *len, int non_block);
 
