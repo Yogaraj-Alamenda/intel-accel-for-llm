@@ -107,6 +107,9 @@ class KVFlow:
         self.cache_size_bytes = int(cache_size_gb * 1024**3)
 
         self.chunk_pool: Optional[ScratchPool] = None  # created on first put/get, once block shape is known
+        # Tasks holding scratch blocks, oldest first: id(task) -> (task, is_put)
+        self._inflight: Dict[int, Tuple[Task, bool]] = {}
+        self._pool_wait_count = 0
 
         self.mem = Mem(
             capacity_bytes=self.cache_size_bytes,
@@ -155,6 +158,59 @@ class KVFlow:
             if envs.IAXL_RDMA_ENABLE:
                 pool = self.chunk_pool.pool
                 _iqt.rdma_register_local(pool.data_ptr(), pool.nbytes, self.chunk_pool.block_bytes)
+
+    def _release_task(self, task: Task):
+        if task.cpu_tensors is not None:
+            self.chunk_pool.release(task.cpu_tensors)
+            task.cpu_tensors = None
+        self._inflight.pop(id(task), None)
+
+    def _finish_put(self, task: Task):
+        task.ctx.zip_wait()
+        task.ctx = None
+        self._release_task(task)
+
+    def _finish_get(self, task: Task):
+        task.ctx.unzip_wait()
+        task.ctx.xfer_wait()
+        task.ctx = None
+        self._release_task(task)
+
+    def _finish_task(self, task: Task, is_put: bool):
+        if is_put:
+            self._finish_put(task)
+        else:
+            self._finish_get(task)
+
+    def _task_is_complete(self, task: Task, is_put: bool) -> bool:
+        if is_put:
+            return task.ctx.zip_is_complete()
+        return task.ctx.unzip_is_complete() and task.ctx.xfer_is_complete()
+
+    def _allocate(self, count: int) -> List[torch.Tensor]:
+        """Allocate scratch blocks, finishing in-flight tasks early to free blocks when
+        the pool is short. A finished task's later put_wait/get_wait is a no-op."""
+        pool = self.chunk_pool
+        if count > pool.num_blocks:
+            raise RuntimeError(
+                f"ScratchPool too small: one tensor needs {count} blocks but the pool has "
+                f"{pool.num_blocks}; increase IAXL_SCRATCH_POOL_SIZE_GB"
+            )
+        if count > pool.available_count():
+            self._pool_wait_count += 1
+            log = logger.warning if self._pool_wait_count == 1 else logger.debug
+            log(
+                "ScratchPool short (need %d, %d/%d free, %d tasks in flight): finishing "
+                "in-flight tasks early; increase IAXL_SCRATCH_POOL_SIZE_GB to avoid the stall",
+                count, pool.available_count(), pool.num_blocks, len(self._inflight),
+            )
+            for task, is_put in list(self._inflight.values()):
+                if self._task_is_complete(task, is_put):
+                    self._finish_task(task, is_put)
+            while count > pool.available_count() and self._inflight:
+                task, is_put = next(iter(self._inflight.values()))
+                self._finish_task(task, is_put)
+        return pool.allocate(count)
 
     def _create_ctx(self, tensor, chunk_dim, direction, description, work_stream):
         if isinstance(tensor, RemoteTensor):
@@ -222,9 +278,7 @@ class KVFlow:
             if self._in_place:
                 cpu_tensors = [tensor[i] for i in chunk_indices]
             else:
-                cpu_tensors = self.chunk_pool.allocate(
-                    num_chunks, chunk_shape, tensor.dtype
-                )
+                cpu_tensors = self._allocate(num_chunks)
 
             ctx = self._create_ctx(
                 tensor,
@@ -253,6 +307,8 @@ class KVFlow:
                 tensor_key=tensor_key,
                 chunk_labels=chunk_labels,
             )
+            if not self._in_place:
+                self._inflight[id(results[tensor_key])] = (results[tensor_key], True)
 
         return results
 
@@ -272,21 +328,16 @@ class KVFlow:
             for key in keys_to_wait:
                 assert key in put_results, f"Key {key} not in put_results"
                 result = put_results[key]
-                assert result.ctx is not None, f"Task ctx is None for key {key}"
-                if not result.ctx.zip_is_complete():
+                if result.ctx is not None and not result.ctx.zip_is_complete():
                     return False
 
         for key in keys_to_wait:
             assert key in put_results, f"Key {key} not in put_results"
 
             result = put_results[key]
-            assert result.ctx is not None, f"Task ctx is None for key {key}"
-            result.ctx.zip_wait()
-            result.ctx = None
-
-            if not self._in_place:
-                self.chunk_pool.release(result.cpu_tensors)
-                result.cpu_tensors = None
+            if result.ctx is None:  # already finished (e.g. early, to free scratch blocks)
+                continue
+            self._finish_put(result)
 
         return True
 
@@ -340,9 +391,7 @@ class KVFlow:
             if self._in_place:
                 cpu_tensors = [tensor[i] for i in chunk_indices]
             else:
-                cpu_tensors = self.chunk_pool.allocate(
-                    num_chunks, chunk_shape, tensor.dtype
-                )
+                cpu_tensors = self._allocate(num_chunks)
 
             ctx = self._create_ctx(
                 tensor,
@@ -366,6 +415,8 @@ class KVFlow:
                 tensor_key=tensor_key,
                 chunk_labels=chunk_labels,
             )
+            if not self._in_place:
+                self._inflight[id(results[tensor_key])] = (results[tensor_key], False)
 
         return results
 
@@ -406,14 +457,7 @@ class KVFlow:
                 if result.ctx is None:
                     continue
 
-                result.ctx.unzip_wait()
-                result.ctx.xfer_wait()
-
-                result.ctx = None
-
-                if result.cpu_tensors is not None:
-                    self.chunk_pool.release(result.cpu_tensors)
-                    result.cpu_tensors = None
+                self._finish_get(result)
 
         return True
 
@@ -500,6 +544,7 @@ class KVFlow:
             "pool_available": pool_available,
             "pool_in_use": pool_in_use,
             "pool_shapes": pool_shapes,
+            "pool_wait_count": self._pool_wait_count,
         }
 
     def get_persist_candidates(self, max_count: int) -> List[str]:
