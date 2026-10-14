@@ -63,6 +63,15 @@ Each thread busy-polls for the whole batch, so every thread costs one core while
 
 Fewer threads give up some peak throughput but leave more cores for inference.
 
+### QAT Compress-and-Verify
+
+QAT compresses without verification unless the QAT library is built in strict mode. Each instance reads `compressAndVerifyStrict` from `cpaDcQueryCapabilities()` at startup and enables verification only when the library requires it; the init log shows `cnv_strict=<0|1>`.
+
+| `IAXL_QATLIB` | Library | Verification |
+| --- | --- | --- |
+| `oot` (default) | QAT20 package built with `--disable-dc-strict-mode` | Off |
+| `intree` | System qatlib, always strict | On; each compression is also decompressed and checked by the device |
+
 ## Block Format and Routing
 
 Every stored block starts with an 8-byte header in front of its payload.

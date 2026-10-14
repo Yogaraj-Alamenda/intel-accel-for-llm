@@ -51,6 +51,7 @@ typedef struct {
     int node;
     int pcie_bus;
     int accel_id;
+    CpaBoolean cnv_strict;
     Slot slot[MAX_QUEUE_DEPTH];
 } Instance;
 
@@ -95,7 +96,7 @@ static int submit_op(Instance *d, int si, int compress, void *src, uint32_t src_
     sl->op.flushFlag = CPA_DC_FLUSH_FINAL;
 
     if (compress)
-        sl->op.compressAndVerify = CPA_FALSE;
+        sl->op.compressAndVerify = d->cnv_strict;
 
     sl->done = 0;
     CpaStatus s = compress ? cpaDcCompressData2(d->inst, d->sess, &sl->lsrc, &sl->ldst, &sl->op,
@@ -218,6 +219,12 @@ static void instance_init(Instance *d, const RawInst *r) {
     IAXL_CHECK(cpaDcStartInstance(d->inst, 0, NULL) == CPA_STATUS_SUCCESS,
                "qat_zip: cpaDcStartInstance failed");
 
+    // Strict-mode libraries (e.g. distro qatlib) reject compression without verification.
+    CpaDcInstanceCapabilities caps = {0};
+    IAXL_CHECK(cpaDcQueryCapabilities(d->inst, &caps) == CPA_STATUS_SUCCESS,
+               "qat_zip: cpaDcQueryCapabilities failed");
+    d->cnv_strict = caps.compressAndVerifyStrict;
+
     Cpa32U sess_size = 0, ctx_size = 0, meta_size = 0;
     IAXL_CHECK(cpaDcGetSessionSize(d->inst, &sd, &sess_size, &ctx_size) == CPA_STATUS_SUCCESS,
                "qat_zip: cpaDcGetSessionSize failed");
@@ -303,7 +310,8 @@ int qat_zip_init(void) {
                     sel[s], got, g_instances_per_device);
     }
     IAXL_CHECK(g_inst_count > 0, "qat_zip: no usable instance");
-    fprintf(stderr, "[qat_zip] init done: %d instance(s) on devices=%s\n", g_inst_count, dev_sel);
+    fprintf(stderr, "[qat_zip] init done: %d instance(s) on devices=%s  cnv_strict=%d\n",
+            g_inst_count, dev_sel, g_inst[0].cnv_strict);
     return 0;
 }
 
