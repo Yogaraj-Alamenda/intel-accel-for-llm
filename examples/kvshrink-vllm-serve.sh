@@ -4,7 +4,10 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/../setvars.sh"
 : "${MODEL:?Set MODEL in setvars.sh or the environment}"
 
-export LD_PRELOAD="/usr/local/lib/libiomp5.so${LD_PRELOAD:+:$LD_PRELOAD}"
+# libiomp5 comes from intel-openmp: /usr/local/lib on the GPU image, $VIRTUAL_ENV/lib on the CPU image.
+IOMP5_LIB=/usr/local/lib/libiomp5.so
+[[ -n "$VIRTUAL_ENV" && -f "$VIRTUAL_ENV/lib/libiomp5.so" ]] && IOMP5_LIB="$VIRTUAL_ENV/lib/libiomp5.so"
+export LD_PRELOAD="$IOMP5_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
 export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4${LD_PRELOAD:+:$LD_PRELOAD}"
 
 parallel_args=(-tp "$TP_SIZE")

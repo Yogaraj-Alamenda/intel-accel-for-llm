@@ -48,7 +48,7 @@ export IAXL_QATLIB=intree   # 在 source setvars.sh / 构建之前设置
 
 `POLICY=0` 为每个进程从每个 QAT 设备各分配一个 VF，`IAXL_QAT_DEVICES` / `KVSHRINK_QAT_DEVICES` 按此编号；若为 `POLICY=1`，每个进程只能看到设备 `0`。
 
-设置 `IAXL_QATLIB=intree` 后，构建会链接 `pkg-config qatlib` 找到的系统 `libqat` / `libusdm`，而不再下载并构建 out-of-tree 驱动包到 `_lib`。在容器内构建时，容器中需要安装 qatlib 开发包，运行时还需从宿主机挂载 `/run/qat`。
+设置 `IAXL_QATLIB=intree` 后，构建会链接 `pkg-config qatlib` 找到的系统 `libqat` / `libusdm`，而不再下载并构建 out-of-tree 驱动包到 `_lib`。使用容器时，`start.sh` 会在开发镜像中构建 qatlib `QATLIB_VERSION`（默认 `26.02.0`，应与宿主机一致），并在宿主机运行 `qatmgr` 时挂载宿主机的 `/run/qat`。
 
 3. 安装 GDRCopy 驱动并配置 DSA：
 
@@ -119,7 +119,7 @@ docker exec -it -w "$PWD" iaxl.vllm bash
 ./tests/vllm-test.sh
 ```
 
-如需在 CPU 上运行模型，请以 `DEVICE=cpu` 构建 IAXL，并参考 [vLLM CPU 推理使用指南](doc/usage/vllm-cpu-inference.zh-CN.md)。
+如需在 CPU 上运行模型，请用 `DEVICE=cpu ./start.sh` 启动容器，并参考 [vLLM CPU 推理使用指南](doc/usage/vllm-cpu-inference.zh-CN.md)。
 
 ## KVShrink vLLM Benchmark
 

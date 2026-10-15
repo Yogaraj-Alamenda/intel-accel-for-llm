@@ -6,15 +6,24 @@ This guide shows how to configure threads and CPU binding when vLLM runs inferen
 
 ## 1. Build
 
-A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available. `docker/Dockerfile.dev` builds GPU dependencies (UCX, NIXL), so the build may also be run directly in an environment that has CPU vLLM installed. Besides the Python build requirements, it needs a C/C++ compiler, CMake, NASM (for the QPL dependency, even with IAA disabled), SQLite, and zlib.
+A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available.
+
+As for GPU inference, build and start the container with `start.sh` from the repository root. Set `IAXL_QATLIB` to match the host QAT driver:
 
 ```bash
-python -m pip install -r requirements.txt
-DEVICE=cpu python -m pip install -e . --no-build-isolation                     # out-of-tree QAT driver package
-DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation # in-tree driver with system qatlib
+export DEVICE=cpu
+export IAXL_QATLIB=intree # in-tree driver (qat_4xxx, VFs bound to vfio-pci); leave unset for the out-of-tree driver (/dev/qat_dev_processes)
+./start.sh
 ```
 
-The out-of-tree build also needs the Boost/Boost Regex, SSL, udev, and netlink development packages. Match the user-space library to the host driver: the out-of-tree runtime expects `/dev/qat_dev_processes`, while qatlib uses the host's VFIO setup.
+With `DEVICE=cpu`, `start.sh`:
+
+- Builds `docker/Dockerfile.dev` on the vLLM CPU release image `vllm/vllm-openai-cpu:v0.29.0` and tags it `vllm-iaxl-dev-cpu`, so it can coexist with the GPU image. UCX and NIXL are skipped. Override `IAXL_BASE_DOCKER_IMAGE` to use another CPU vLLM image.
+- With `IAXL_QATLIB=intree`, builds qatlib from source into the image (the Ubuntu 22.04 CPU image has no qatlib package) and mounts the host `/run/qat`, so each rank gets its QAT instances from the host `qatmgr`. If the host qatlib is not `26.02.0`, `export QATLIB_VERSION=<host version>` before `./start.sh`. Without `qatmgr`, the first process reserves all QAT devices, so runs with more than one rank need it.
+- Starts the container without GPU arguments and builds IAXL with `DEVICE=cpu` on entry.
+
+> [!NOTE]
+> Without Docker, IAXL also builds in an environment that already has CPU vLLM installed. Install the packages that `docker/Dockerfile.dev` installs (except UCX and NIXL), then run `python -m pip install -r requirements.txt` and `DEVICE=cpu python -m pip install -e . --no-build-isolation`, with `IAXL_QATLIB=intree` for the in-tree driver.
 
 ## 2. CPU Binding
 
@@ -62,7 +71,7 @@ When choosing CPUs:
 This example runs two ranks on a host where NUMA node 0 has CPUs 0-63 and node 1 has CPUs 64-127, with one logical CPU per core:
 
 ```bash
-export DEVICE=cpu # start.sh passes it into the container, which builds IAXL on entry
+export DEVICE=cpu # start.sh builds the CPU image (see section 1); the container builds IAXL on entry
 ./start.sh
 
 # In the container shell opened by start.sh

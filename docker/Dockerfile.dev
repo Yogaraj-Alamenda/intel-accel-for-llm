@@ -10,7 +10,7 @@ RUN CUDA_DIR=$(ls -d /usr/local/cuda-[0-9]*.[0-9]* 2>/dev/null | sort -V | tail 
         libboost-all-dev libudev-dev nasm yasm liblz4-dev libsqlite3-dev \
         zlib1g-dev libtcmalloc-minimal4 \
         uuid-dev libjson-c-dev \
-        build-essential cmake \
+        build-essential cmake autoconf automake libtool \
         rdma-core libibverbs-dev librdmacm-dev libnuma-dev \
         $(apt-cache search "linux-headers-5.15.*-generic" | tail -n 1 | awk '{print $1}') \
         ${CUDA_VERSION:+cuda-nvml-dev-$CUDA_VERSION} \
@@ -20,10 +20,14 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
+# cuda | xpu | cpu; DEVICE=cpu builds no RDMA (remote_pool), so UCX and NIXL are skipped.
+ARG DEVICE=cuda
+
 # Own prefix: Ubuntu's libucx0 1.12 (a libboost-mpi/openmpi dependency) lives in
 # /usr/lib/x86_64-linux-gnu and would shadow a UCX installed under /usr at runtime.
 # ld.so.conf.d/ucx.conf sorts before x86_64-linux-gnu.conf, so this UCX wins.
-RUN git clone https://github.com/openucx/ucx.git /opt/ucx && \
+RUN if [ "$DEVICE" = cpu ]; then exit 0; fi && \
+    git clone https://github.com/openucx/ucx.git /opt/ucx && \
     cd /opt/ucx && git checkout v1.21.0 && \
     ./autogen.sh && \
     ./contrib/configure-release-mt \
@@ -37,7 +41,8 @@ RUN git clone https://github.com/openucx/ucx.git /opt/ucx && \
     echo /usr/local/ucx/lib > /etc/ld.so.conf.d/ucx.conf && ldconfig
 ENV PATH=/usr/local/ucx/bin:$PATH
 
-RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
+RUN if [ "$DEVICE" = cpu ]; then exit 0; fi && \
+    git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
     cd /opt/nixl && \
     git checkout v1.2.0 && \
     meson setup build \
@@ -57,3 +62,20 @@ RUN echo "install idxd-config" \
     && make install \
     && rm -rf /idxd-config
 
+# IAXL_QATLIB=intree (in-tree qat_4xxx/VFIO driver) links the system qatlib, built from
+# source because Ubuntu 22.04 (the vLLM CPU image) has no qatlib package. It talks to the
+# host qatmgr through /run/qat, which setvars.sh mounts; match QATLIB_VERSION to the host.
+ARG IAXL_QATLIB=
+ARG QATLIB_VERSION=26.02.0
+RUN if [ "$IAXL_QATLIB" != intree ]; then exit 0; fi \
+    && apt-get update -y \
+    && apt-get install -y autoconf-archive libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch "$QATLIB_VERSION" https://github.com/intel/qatlib.git /qatlib \
+    && cd /qatlib \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr --enable-systemd=no \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && rm -rf /qatlib

@@ -1,7 +1,3 @@
-export IAXL_BASE_DOCKER_IMAGE=${IAXL_BASE_DOCKER_IMAGE:-"vllm/vllm-openai:v0.29.0"}
-export IAXL_DEV_DOCKER_IMAGE=${IAXL_DEV_DOCKER_IMAGE:-"vllm-iaxl-dev"}
-export IAXL_BUILDER_DOCKER_IMAGE=${IAXL_BUILDER_DOCKER_IMAGE:-"vllm-iaxl-builder"}
-
 TOP_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$TOP_DIR/tools/auto_config.sh"
 $TOP_DIR/tools/setup_system.sh
@@ -13,8 +9,16 @@ $TOP_DIR/tools/setup_system.sh
 
 # ---- Build ------------------------------------------------------------------
 export DEVICE=${DEVICE:-cuda}                 # Build backend: cuda | xpu | cpu (vLLM CPU inference)
+if [[ "$DEVICE" == cpu ]]; then
+    export IAXL_BASE_DOCKER_IMAGE=${IAXL_BASE_DOCKER_IMAGE:-"vllm/vllm-openai-cpu:v0.29.0"} # vLLM CPU release image
+    export IAXL_DEV_DOCKER_IMAGE=${IAXL_DEV_DOCKER_IMAGE:-"vllm-iaxl-dev-cpu"}
+fi
+export IAXL_BASE_DOCKER_IMAGE=${IAXL_BASE_DOCKER_IMAGE:-"vllm/vllm-openai:v0.29.0"} # Base image for docker/Dockerfile.dev
+export IAXL_DEV_DOCKER_IMAGE=${IAXL_DEV_DOCKER_IMAGE:-"vllm-iaxl-dev"}              # Dev image tag built by start.sh
+export IAXL_BUILDER_DOCKER_IMAGE=${IAXL_BUILDER_DOCKER_IMAGE:-"vllm-iaxl-builder"}
 export IAXL_CMAKE_ARGS=${IAXL_CMAKE_ARGS:-""} # Extra cmake flags, e.g. "-DENABLE_NVTX=OFF"
 # export IAXL_QATLIB=intree                   # Optional: link system qatlib (in-tree driver); unset = out-of-tree QAT20 package
+# export QATLIB_VERSION=26.02.0               # Optional: qatlib built into the dev image for IAXL_QATLIB=intree; match the host qatmgr
 export NVIDIA_RUNTIME=${NVIDIA_RUNTIME:-}     # Set to "none" to skip the nvidia docker runtime/gpus args (e.g. on a storage-only node without GPUs)
 
 # ---- Feature switches -------------------------------------------------------
@@ -216,6 +220,10 @@ for var in "${ENV_VARS[@]}"; do
 done
 DOCKER_RUN_ARGS+=("-e" "HF_HOME=/_data/hf_home")
 DOCKER_RUN_ARGS+=("-v" "$PWD/_data:/_data")
+# qatlib (IAXL_QATLIB=intree) shares the host's QAT VFs through the host qatmgr socket.
+if [[ "$IAXL_QATLIB" == intree && -S /run/qat/qatmgr.sock ]]; then
+    DOCKER_RUN_ARGS+=("-v" "/run/qat:/run/qat")
+fi
 if [[ -d "$MODEL" ]]; then
     MODEL_DIR=$(realpath "$MODEL")
     DOCKER_RUN_ARGS+=("-v" "$MODEL_DIR:$MODEL_DIR:ro")

@@ -50,7 +50,7 @@ export IAXL_QATLIB=intree   # before sourcing setvars.sh / building
 
 `POLICY=0` gives every process one virtual function from each QAT device, which `IAXL_QAT_DEVICES` / `KVSHRINK_QAT_DEVICES` index. With `POLICY=1` each process only sees device `0`.
 
-With `IAXL_QATLIB=intree` the build links the system `libqat` / `libusdm` found by `pkg-config qatlib` instead of downloading and building the out-of-tree package into `_lib`. For container builds, the qatlib development packages must be installed inside the container, and `/run/qat` must be mounted from the host at runtime.
+With `IAXL_QATLIB=intree` the build links the system `libqat` / `libusdm` found by `pkg-config qatlib` instead of downloading and building the out-of-tree package into `_lib`. For container builds, `start.sh` builds qatlib `QATLIB_VERSION` (default `26.02.0`; match the host) into the dev image and mounts the host `/run/qat` when `qatmgr` is running.
 
 3. Install the GDRCopy driver and configure DSA:
 
@@ -121,7 +121,7 @@ Send a Chat Completions test request:
 ./tests/vllm-test.sh
 ```
 
-To run the model on the CPU, build IAXL with `DEVICE=cpu` and follow the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md).
+To run the model on the CPU, start the container with `DEVICE=cpu ./start.sh` and follow the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md).
 
 ## KVShrink vLLM Benchmark
 

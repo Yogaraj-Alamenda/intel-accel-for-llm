@@ -6,15 +6,24 @@
 
 ## 1. 构建
 
-`DEVICE=cpu` 构建与 GPU 推理使用相同的 `KVStore`、压缩编解码和 persist/evict API。它不需要 CUDA、SYCL、GDRCopy 或 NIXL，因此不支持 DSA 传输和 RDMA（`remote_pool`）。`docker/Dockerfile.dev` 会构建 GPU 依赖（UCX、NIXL），因此也可以直接在已安装 CPU 版 vLLM 的环境中构建。除 Python 构建依赖外，还需要 C/C++ 编译器、CMake、NASM（QPL 依赖需要，即使不启用 IAA）、SQLite 和 zlib。
+`DEVICE=cpu` 构建与 GPU 推理使用相同的 `KVStore`、压缩编解码和 persist/evict API。它不需要 CUDA、SYCL、GDRCopy 或 NIXL，因此不支持 DSA 传输和 RDMA（`remote_pool`）。
+
+与 GPU 推理相同，在仓库根目录用 `start.sh` 构建并启动容器。`IAXL_QATLIB` 要与宿主机的 QAT 驱动一致：
 
 ```bash
-python -m pip install -r requirements.txt
-DEVICE=cpu python -m pip install -e . --no-build-isolation                     # out-of-tree QAT 驱动包
-DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation # in-tree 驱动 + 系统 qatlib
+export DEVICE=cpu
+export IAXL_QATLIB=intree # in-tree 驱动（qat_4xxx，VF 绑定到 vfio-pci）；out-of-tree 驱动（/dev/qat_dev_processes）不设置
+./start.sh
 ```
 
-out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包。用户态库要与宿主机驱动一致：out-of-tree 运行时需要 `/dev/qat_dev_processes`，qatlib 使用宿主机的 VFIO 配置。
+设置 `DEVICE=cpu` 后，`start.sh` 会：
+
+- 基于 vLLM CPU 发布镜像 `vllm/vllm-openai-cpu:v0.29.0` 构建 `docker/Dockerfile.dev`，镜像名为 `vllm-iaxl-dev-cpu`，可与 GPU 镜像共存，并跳过 UCX 和 NIXL。如需使用其他 CPU 版 vLLM 镜像，可覆盖 `IAXL_BASE_DOCKER_IMAGE`。
+- 设置 `IAXL_QATLIB=intree` 时，在镜像中从源码构建 qatlib（Ubuntu 22.04 的 CPU 镜像没有 qatlib 软件包），并挂载宿主机的 `/run/qat`，各 rank 通过宿主机 `qatmgr` 获取 QAT instance。如果宿主机 qatlib 不是 `26.02.0`，运行 `./start.sh` 前 `export QATLIB_VERSION=<宿主机版本>`。没有 `qatmgr` 时，第一个进程会占用全部 QAT 设备，因此多 rank 运行需要 `qatmgr`。
+- 以不带 GPU 参数的方式启动容器，并在容器启动时以 `DEVICE=cpu` 构建 IAXL。
+
+> [!NOTE]
+> 不使用 Docker 时，也可以在已安装 CPU 版 vLLM 的环境中构建 IAXL。先安装 `docker/Dockerfile.dev` 中安装的软件包（UCX 和 NIXL 除外），再执行 `python -m pip install -r requirements.txt` 和 `DEVICE=cpu python -m pip install -e . --no-build-isolation`；使用 in-tree 驱动时加上 `IAXL_QATLIB=intree`。
 
 ## 2. CPU 绑核
 
@@ -62,7 +71,7 @@ out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包
 下面的例子在两个 NUMA 节点上运行两个 rank：节点 0 是 CPU 0-63，节点 1 是 CPU 64-127，每个物理核一个逻辑 CPU。
 
 ```bash
-export DEVICE=cpu # start.sh 会把它传入容器，容器启动时构建 IAXL
+export DEVICE=cpu # start.sh 构建 CPU 镜像（见第 1 节），容器启动时构建 IAXL
 ./start.sh
 
 # 在 start.sh 打开的容器 shell 中执行
