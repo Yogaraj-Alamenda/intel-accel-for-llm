@@ -12,8 +12,7 @@ if [[ "$IAXL_RDMA_ENABLE" != "1" ]]; then
 fi
 : "${IAXL_RDMA_DAEMON_NIC_IPS:?Set IAXL_RDMA_DAEMON_NIC_IPS (comma list of local RDMA NIC IPs; a single IP is allowed)}"
 
-export LD_PRELOAD="/usr/local/lib/libiomp5.so${LD_PRELOAD:+:$LD_PRELOAD}"
-export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4${LD_PRELOAD:+:$LD_PRELOAD}"
+export LD_PRELOAD="$IAXL_LD_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}"
 
 cd "$SCRIPT_DIR/.."
 python3 -X faulthandler -m iaxl.remote_pool.daemon \

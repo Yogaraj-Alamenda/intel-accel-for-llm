@@ -35,8 +35,7 @@ export TP_SIZE=$RANKS
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../setvars.sh"
 
-export LD_PRELOAD="/usr/local/lib/libiomp5.so${LD_PRELOAD:+:$LD_PRELOAD}"
-export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4${LD_PRELOAD:+:$LD_PRELOAD}"
+export LD_PRELOAD="$IAXL_LD_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}"
 
 # Each rank process binds its own CPUs / accelerators via iaxl.utils.affinity.
 BENCH=(python3 "$SCRIPT_DIR/kvstore_benchmark_multi_ranks.py" "${PY_ARGS[@]}")

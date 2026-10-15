@@ -16,15 +16,24 @@ QATURL   := https://downloadmirror.intel.com/921047/QAT20.L.1.2.30-00178.tar.gz
 QATARCHIVE := QAT20.L.1.2.30-00178.tar.gz
 BUILD_DEPS := /opt/iaxl-build-deps
 # IAXL_QATLIB (optional): oot (default when unset/empty) = build the out-of-tree
-# QAT20 package into _lib, intree = system qatlib for the in-tree kernel driver.
+# QAT20 package into _lib, intree = qatlib for the in-tree kernel driver: the system
+# qatlib when pkg-config finds it, else qatlib IAXL_QATLIB_VERSION built into _lib.
 QATMODE  := $(or $(strip $(IAXL_QATLIB)),oot)
+QATLIBBUILD   := ../../_build/qatlib
+QATLIBREPO    := https://github.com/intel/qatlib.git
+QATLIBTAG     := $(or $(strip $(IAXL_QATLIB_VERSION)),26.02.0)
+QATLIBPREFIX  := $(abspath $(QATLIBBUILD)/install)
+QATLIBHEADER  := $(QATLIBPREFIX)/include/qat/cpa.h
 ifeq ($(QATMODE),intree)
-ifeq ($(shell pkg-config --exists qatlib 2>/dev/null && echo 1),)
-$(error IAXL_QATLIB=intree but qatlib was not found by pkg-config)
-endif
+ifneq ($(shell pkg-config --exists qatlib 2>/dev/null && echo 1),)
 QATLIBS  :=
 QATCFLAGS:= -I$(shell pkg-config --variable=includedir qatlib)/qat
 QATLDLIBS:= $(shell pkg-config --libs-only-L libqat libusdm) -lqat -lusdm
+else
+QATLIBS  := $(LIBDIR)/libqat.so $(LIBDIR)/libusdm.so $(QATLIBHEADER)
+QATCFLAGS:= -I$(QATLIBPREFIX)/include/qat
+QATLDLIBS:= -L$(LIBDIR) -lqat -lusdm
+endif
 else ifeq ($(QATMODE),oot)
 QATLIBS  := $(LIBDIR)/libqat_s.so $(LIBDIR)/libusdm_drv_s.so
 QATCFLAGS:=
@@ -108,6 +117,27 @@ $(LIBDIR)/libqat_s.so:
 	    && sed "s/^ALL_TARGETS\ *=\ *.*/ALL_TARGETS = lac_user/g" -i quickassist/Makefile \
 	    && make -j"$$(nproc)" quickassist-all
 	cp -a $(QATBUILD)/build/*.so $(LIBDIR)/
+
+$(LIBDIR)/libqat.so $(LIBDIR)/libusdm.so $(QATLIBHEADER) &:
+	mkdir -p $(QATLIBBUILD)
+	mkdir -p $(LIBDIR)
+	cd $(QATLIBBUILD) \
+	    && if [ ! -d "qatlib-$(QATLIBTAG)" ]; then \
+	        if [ -d "$(BUILD_DEPS)/qatlib-$(QATLIBTAG)" ]; then \
+	            cp -a "$(BUILD_DEPS)/qatlib-$(QATLIBTAG)" "qatlib-$(QATLIBTAG)"; \
+	        elif [ "$${IAXL_OFFLINE:-0}" = 1 ]; then \
+	            echo "Missing offline qatlib source in $(BUILD_DEPS)" >&2; exit 1; \
+	        else \
+	            git clone -b $(QATLIBTAG) --depth 1 $(QATLIBREPO) "qatlib-$(QATLIBTAG)"; \
+	        fi; \
+	    fi
+	cd $(QATLIBBUILD)/qatlib-$(QATLIBTAG) \
+	    && ./autogen.sh \
+	    && ./configure --prefix="$(QATLIBPREFIX)" --libdir="$(QATLIBPREFIX)/lib" \
+	        --enable-systemd=no --enable-samples=no \
+	    && make -j"$$(nproc)" \
+	    && make install
+	cp -a $(QATLIBPREFIX)/lib/libqat.so* $(QATLIBPREFIX)/lib/libusdm.so* $(LIBDIR)/
 
 $(QPLLIBS) $(QPLHEADER) &:
 	mkdir -p $(QPLBUILD)
