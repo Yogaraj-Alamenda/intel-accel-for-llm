@@ -74,7 +74,7 @@ Optional byte shuffling improves BF16 compressibility, and independently configu
 
 - **Asynchronous pipeline:** dedicated device streams and native work queues overlap transfer, compression, and inference where dependencies allow.
 - **Batch-oriented movement:** block fragments are copied in batches; DSA requires an 8-byte-aligned inner copy width, and unsupported layouts automatically use CUDA copies.
-- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the hot path.
+- **Pinned-buffer reuse:** `ScratchPool` avoids allocation and registration on the hot path. The pool has a fixed size (`IAXL_SCRATCH_POOL_SIZE_GB`); when it runs short, `KVFlow` finishes in-flight puts and gets early (completed ones first, then the oldest) to reclaim blocks instead of failing.
 - **Hybrid compression:** QAT and IAA provide the accelerated paths; CPU workers provide additional throughput and a compatible software path.
 - **Selective compression:** latency-sensitive leading layers can bypass compression while later layers remain compressed.
 - **Capacity management:** grouped entries, LRU tracking, and explicit persist/evict operations bound DDR use without changing block identity.
