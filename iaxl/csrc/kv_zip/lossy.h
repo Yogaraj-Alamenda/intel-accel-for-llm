@@ -3,10 +3,11 @@
 
 #pragma once
 
-#include <cstddef>
+#include <cstdint>
 
 namespace kv_zip {
 
-void lossy_trunc(char *data, size_t size, int element_size);
+// IAXL_KV_LOSSY_TRUNC as an AND mask for every 16-bit word of a tensor; 0xFFFF keeps all bits.
+uint16_t lossy_mask(int element_size);
 
 }

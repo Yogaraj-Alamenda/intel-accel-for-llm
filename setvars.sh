@@ -83,9 +83,11 @@ printf '%s\n' \
 # ---- Cache / compression ----------------------------------------------------
 export IAXL_KV_LOSSY_TRUNC=${IAXL_KV_LOSSY_TRUNC:-0}                     # Lossy LSB truncation: 'auto', 0 (off), or N bits
 export IAXL_KV_DATA_SHUFFLE=${IAXL_KV_DATA_SHUFFLE:-1}                   # Byte-shuffle before compression (0/1)
+export IAXL_ZIP_EXPONENT_ONLY=${IAXL_ZIP_EXPONENT_ONLY:-$IAXL_KV_DATA_SHUFFLE} # With shuffle, compress only the BF16 high (sign/exponent) bytes and store the low bytes raw (0/1)
 export IAXL_ZIP_LEVEL=${IAXL_ZIP_LEVEL:-1}                               # Compression level 1-9: higher = better ratio, slower
-export IAXL_ZIP_SRC_CAP=${IAXL_ZIP_SRC_CAP:-262144}                      # Source/decompressed block capacity (256 KiB)
-export IAXL_ZIP_DST_CAP=${IAXL_ZIP_DST_CAP:-262144}                      # Compressed-output capacity (256 KiB)
+export IAXL_ZIP_SRC_CAP=${IAXL_ZIP_SRC_CAP:-4194304}                     # Source/decompressed block capacity (4 MiB)
+export IAXL_ZIP_DST_CAP=${IAXL_ZIP_DST_CAP:-4194304}                     # Compressed-output capacity (4 MiB)
+export IAXL_ZIP_SEGMENT_SIZE_KB=${IAXL_ZIP_SEGMENT_SIZE_KB:-0}           # Compress blocks in segments of N KiB (0 = whole block)
 export IAXL_CACHE_DIR=${IAXL_CACHE_DIR:-_data/kvcache}                   # Base directory for persisted cache files
 export IAXL_CACHE_STREAM_SYNC_ON_GET=${IAXL_CACHE_STREAM_SYNC_ON_GET:-0} # CPU-sync the GPU stream on get() (0/1)
 export IAXL_CACHE_CACHEGROUP_SIZE=${IAXL_CACHE_CACHEGROUP_SIZE:-100}     # Reserved entries per cache group
@@ -97,7 +99,7 @@ export IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS=${IAXL_KVSTORE_SKIP_COMPRESSION_LAYE
 
 # ---- Intel QAT (compression accelerator) ------------------------------------
 export IAXL_QAT_DEVICES=${IAXL_QAT_DEVICES:-0}                                   # Comma-separated QAT device indices, e.g. "0,1"
-export IAXL_QAT_ZIP_INSTANCES_PER_DEVICE=${IAXL_QAT_ZIP_INSTANCES_PER_DEVICE:-2} # Instances (driving threads) per device
+export IAXL_QAT_ZIP_INSTANCES_PER_DEVICE=${IAXL_QAT_ZIP_INSTANCES_PER_DEVICE:-4} # Instances (driving threads) per device
 # QAT driving threads = number of devices x instances-per-device (override to force).
 case "${IAXL_QAT_ZIP_ENABLE,,}" in
     1|true|yes|on)
@@ -127,7 +129,8 @@ case "${IAXL_CPU_ZIP_ENABLE,,}" in
     *) export IAXL_CPU_ZIP_THREADS=0 ;;
 esac
 if env_truthy "$IAXL_QAT_ZIP_ENABLE" "$IAXL_IAA_ZIP_ENABLE" "$IAXL_CPU_ZIP_ENABLE"; then
-    # Defaults to one thread per zip worker; fewer threads each poll several workers (1 = caller only).
+    # Defaults to one thread per zip worker; fewer threads each poll several workers (1 = caller only),
+    # more threads split a worker's in-flight requests (up to one thread per request).
     export IAXL_OMP_THREAD_NUM=${IAXL_OMP_THREAD_NUM:-$(omp_thread_count "$IAXL_QAT_INSTANCE_NUM" "$IAXL_CPU_ZIP_THREADS" "$IAXL_IAA_INSTANCE_NUM")} || return 1 2>/dev/null || exit 1
 else
     # No zip worker: OpenMP threads only copy raw KV blocks on the host; cap at 4.

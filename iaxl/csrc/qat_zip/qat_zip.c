@@ -73,9 +73,10 @@ static int g_dev_node[MAX_DEVICES];
 static int g_dev_accel[MAX_DEVICES];
 static int g_dev_count = 0;
 
+// Runs in whichever thread polls the instance, which may not own the slot.
 static void dc_callback(void *cb_param, CpaStatus status) {
     (void)status;
-    *(int *)cb_param = 1;
+    __atomic_store_n((int *)cb_param, 1, __ATOMIC_RELEASE);
 }
 
 static int submit_op(Instance *d, int si, int compress, void *src, uint32_t src_len, void *dst,
@@ -108,9 +109,9 @@ static int submit_op(Instance *d, int si, int compress, void *src, uint32_t src_
 
 static int wait_op(Instance *d, int si, int non_block, uint32_t *produced) {
     Slot *sl = &d->slot[si];
-    while (!sl->done) {
+    while (!__atomic_load_n(&sl->done, __ATOMIC_ACQUIRE)) {
         icp_sal_DcPollInstance(d->inst, 0);
-        if (non_block && !sl->done)
+        if (non_block && !__atomic_load_n(&sl->done, __ATOMIC_ACQUIRE))
             return IAXL_ZIP_PENDING;
     }
     if (sl->res.status != CPA_DC_OK)
@@ -319,6 +320,12 @@ int qat_zip_num_slots(void) { return g_inst_count * g_queue_depth; }
 int qat_zip_queue_depth(void) { return g_queue_depth; }
 int qat_zip_src_cap(void) { return (int)g_src_cap; }
 
+void *qat_zip_src_buf(int slot) {
+    if (slot < 0 || slot >= g_inst_count * g_queue_depth)
+        return NULL;
+    return g_inst[slot / g_queue_depth].slot[slot % g_queue_depth].in;
+}
+
 static int submit_slot(int slot, int compress, void *src, int len) {
     if (slot < 0 || slot >= g_inst_count * g_queue_depth)
         return -1;
@@ -332,7 +339,8 @@ static int submit_slot(int slot, int compress, void *src, int len) {
     int si = slot % g_queue_depth;
     Slot *sl = &in->slot[si];
 
-    memcpy(sl->in, src, (size_t)len);
+    if (src != sl->in)
+        memcpy(sl->in, src, (size_t)len);
     return submit_op(in, si, compress, sl->in, (uint32_t)len, sl->out, output_cap);
 }
 

@@ -42,7 +42,7 @@ out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包
 | 变量 | 推荐值 | 作用 |
 | --- | --- | --- |
 | `IAXL_USE_OMP` | `0`（`DEVICE=cpu` 时的默认值） | IAXL 不用 OpenMP，改用自己的线程池，OpenMP 留给 vLLM。此时 `setvars.sh` 会 unset `OMP_NUM_THREADS` 和 `OMP_THREAD_LIMIT`。 |
-| `IAXL_OMP_THREAD_NUM` | `1` 或 `2` | 驱动压缩 worker 的线程数。一个线程就能让多个 QAT/IAA 实例保持忙碌。取值范围是 1 到 worker 数。 |
+| `IAXL_OMP_THREAD_NUM` | `1` 或 `2` | 驱动压缩 worker 的线程数。一个线程就能让多个 QAT/IAA 实例保持忙碌；线程数超过 worker 数时，各 worker 的在途请求分给多个线程。 |
 | `IAXL_CPU_ZIP_ENABLE` | `0` | 不占用 CPU 核跑 zlib，由 QAT 和 IAA 压缩。 |
 | `IAXL_QAT_ZIP_ENABLE`、`IAXL_IAA_ZIP_ENABLE` | 有哪种加速器就设为 `1` | worker 数为 `IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM`，`setvars.sh` 会打印这两个值。 |
 
@@ -54,7 +54,7 @@ out-of-tree 构建还需要 Boost/Boost Regex、SSL、udev 和 netlink 开发包
 | --- | --- |
 | `VLLM_CPU_KVCACHE_SPACE` | vLLM 运行时 KV cache 大小（GiB）。KVShrink 压缩缓存的大小由 `IAXL_DDR_POOL_SIZE_GB` 单独设置。 |
 | `MAX_MODEL_LEN` | `--max-model-len`（默认 `32765`）。CPU KV cache 放不下一个满长度请求时调小。 |
-| `BLOCK_SIZE` | `--block-size`（默认 `16`）。CPU 上每层一个 KV block 为 `2 × num_kv_heads × block_size × head_size × dtype_bytes` 字节，必须不超过 `IAXL_ZIP_SRC_CAP`，压缩后不超过 `IAXL_ZIP_DST_CAP`（默认都是 256 KiB）。 |
+| `BLOCK_SIZE` | `--block-size`（默认 `16`）。CPU 上每层一个 KV block 为 `2 × num_kv_heads × block_size × head_size × dtype_bytes` 字节，必须不超过 `IAXL_ZIP_SRC_CAP`，压缩后不超过 `IAXL_ZIP_DST_CAP`（`setvars.sh` 中都设为 4 MiB）。block 更大时，可以同时调大这两个值，或者设置 `IAXL_ZIP_SEGMENT_SIZE_KB`，按该大小（单位 KiB）分段压缩，这时只需每段（小于该大小的两倍）满足上述限制。 |
 | `IAXL_KV_DATA_SHUFFLE`、`IAXL_KV_LOSSY_TRUNC` | 两者都为 `0` 时，编解码直接从 vLLM 的 KV block 压缩、直接解压到 KV block，没有中转拷贝。`setvars.sh` 默认开启字节重排。任一开启都会改写编解码输入，block 需要先拷贝到 scratch buffer。字节重排能提升压缩率，代价是对每个 block 多做一遍处理。 |
 
 ## 5. 示例
@@ -100,7 +100,7 @@ export IAXL_OMP_THREAD_NUM=2
 | `KVSHRINK_CPU_OMP_THREADS_BIND has N entries, but rank is R` | 每个 rank 提供一项，共 `TP_SIZE × DP_SIZE` 项。 |
 | `invalid IAXL_CPU_OMP_THREADS_BIND` | 某一项不是合法的 CPU 列表。 |
 | `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | 列出的 CPU 进程都用不了，例如不在容器的 cpuset 内。 |
-| `IAXL_OMP_THREAD_NUM must be between 1 and ...` | 调小 `IAXL_OMP_THREAD_NUM`，或启用更多 QAT/IAA 实例。 |
+| `IAXL_OMP_THREAD_NUM must be a positive integer` | 把 `IAXL_OMP_THREAD_NUM` 设为 1 或更大。 |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | `VLLM_CPU_OMP_THREADS_BIND` 中最小的一项 CPU 太少。调小 `IAXL_RESERVED_CPU_NUM` 或 `IAXL_OMP_THREAD_NUM`。 |
 | vLLM 警告 `LD_PRELOAD` 中没有 libiomp 或 libtcmalloc | 用 `examples/kvshrink-vllm-serve.sh` 启动 vLLM。 |
 | `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | 跨节点 KV cache 复用需要 CUDA 或 XPU 构建。 |

@@ -46,6 +46,7 @@ struct Envs {
     int IAXL_ZIP_SRC_CAP;
     int IAXL_ZIP_DST_CAP;
     int IAXL_ZIP_LEVEL;
+    int IAXL_ZIP_SEGMENT_SIZE_KB;
 
     bool IAXL_QAT_ZIP_ENABLE;
     bool IAXL_IAA_ZIP_ENABLE;
@@ -65,6 +66,7 @@ struct Envs {
     bool IAXL_KV_COMPRESSION;
     int IAXL_KV_LOSSY_TRUNC;
     bool IAXL_KV_DATA_SHUFFLE;
+    bool IAXL_ZIP_EXPONENT_ONLY;
     int IAXL_CACHE_CACHEGROUP_SIZE;
     int IAXL_CACHE_CACHEGROUP_NUM;
 

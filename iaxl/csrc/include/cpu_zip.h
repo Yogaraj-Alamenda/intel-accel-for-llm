@@ -17,6 +17,9 @@ int cpu_zip_queue_depth(void);
 
 int cpu_zip_src_cap(void);
 
+// A slot-owned buffer of IAXL_ZIP_SRC_CAP bytes that src may point to.
+void *cpu_zip_src_buf(int slot);
+
 // Non-zero when this build's compressed output stays inside the 4 KB window IAA can decode.
 int cpu_zip_iaa_decodable(void);
 

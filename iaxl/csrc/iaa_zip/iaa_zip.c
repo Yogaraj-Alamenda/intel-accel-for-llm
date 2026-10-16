@@ -283,6 +283,11 @@ static IaaSlot *resolve_slot(int slot) {
     return &g_inst[slot / g_queue_depth].slot[slot % g_queue_depth];
 }
 
+void *iaa_zip_src_buf(int slot) {
+    IaaSlot *sl = resolve_slot(slot);
+    return sl ? sl->in : NULL;
+}
+
 static void prepare_job(IaaSlot *sl) {
     qpl_job *job = sl->job;
     job->op = sl->compress ? qpl_op_compress : qpl_op_decompress;
@@ -340,7 +345,8 @@ static int submit_slot(int slot, int compress, void *src, int len) {
     if ((uint32_t)len > (compress ? g_src_cap : g_dst_cap))
         return -1;
 
-    memcpy(sl->in, src, (size_t)len);
+    if (src != sl->in)
+        memcpy(sl->in, src, (size_t)len);
     sl->compress = compress;
     sl->in_len = (uint32_t)len;
     prepare_job(sl);

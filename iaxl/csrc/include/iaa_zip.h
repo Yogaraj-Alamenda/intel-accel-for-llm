@@ -16,6 +16,9 @@ int iaa_zip_queue_depth(void);
 
 int iaa_zip_src_cap(void);
 
+// The slot's input buffer, at least IAXL_ZIP_SRC_CAP bytes. A src pointing to it is not copied.
+void *iaa_zip_src_buf(int slot);
+
 int iaa_zip_compress(int slot, void *src, int len);
 int iaa_zip_decompress(int slot, void *src, int len);
 

@@ -42,7 +42,7 @@ When choosing CPUs:
 | Variable | Recommended | Purpose |
 | --- | --- | --- |
 | `IAXL_USE_OMP` | `0` (default with `DEVICE=cpu`) | IAXL runs on its own thread pool instead of OpenMP, which leaves OpenMP to vLLM. `setvars.sh` then unsets `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. |
-| `IAXL_OMP_THREAD_NUM` | `1` or `2` | Number of threads driving the compression workers. One thread can keep several QAT/IAA instances busy. Valid range: 1 to the worker count. |
+| `IAXL_OMP_THREAD_NUM` | `1` or `2` | Number of threads driving the compression workers. One thread can keep several QAT/IAA instances busy; more threads than workers split each worker's in-flight requests. |
 | `IAXL_CPU_ZIP_ENABLE` | `0` | Spends no cores on zlib; QAT and IAA do the compression. |
 | `IAXL_QAT_ZIP_ENABLE`, `IAXL_IAA_ZIP_ENABLE` | `1` for the accelerators you have | The worker count is `IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM`; `setvars.sh` prints both values. |
 
@@ -54,7 +54,7 @@ When choosing CPUs:
 | --- | --- |
 | `VLLM_CPU_KVCACHE_SPACE` | Live vLLM KV cache size in GiB. `IAXL_DDR_POOL_SIZE_GB` sizes the compressed KVShrink cache independently. |
 | `MAX_MODEL_LEN` | `--max-model-len` (default `32765`). Lower it when the CPU KV cache cannot hold one full-length request. |
-| `BLOCK_SIZE` | `--block-size` (default `16`). A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 256 KiB by default). |
+| `BLOCK_SIZE` | `--block-size` (default `16`). A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 4 MiB in `setvars.sh`). For larger blocks, raise both caps or set `IAXL_ZIP_SEGMENT_SIZE_KB` to compress each block in segments of that many KiB; then only each segment, shorter than twice that size, must fit. |
 | `IAXL_KV_DATA_SHUFFLE`, `IAXL_KV_LOSSY_TRUNC` | With both set to `0`, the codec compresses straight from the vLLM KV blocks and decompresses straight into them, with no staging copies. `setvars.sh` enables shuffle by default. Either one rewrites the codec input, so blocks are staged in scratch buffers. Shuffle improves the compression ratio at the cost of one extra pass over every block. |
 
 ## 5. Example
@@ -100,7 +100,7 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 | `KVSHRINK_CPU_OMP_THREADS_BIND has N entries, but rank is R` | Provide one entry per rank (`TP_SIZE × DP_SIZE`). |
 | `invalid IAXL_CPU_OMP_THREADS_BIND` | An entry is not a valid CPU list. |
 | `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | None of the listed CPUs is available to the process, for example because they are outside the container's cpuset. |
-| `IAXL_OMP_THREAD_NUM must be between 1 and ...` | Lower `IAXL_OMP_THREAD_NUM`, or enable more QAT/IAA instances. |
+| `IAXL_OMP_THREAD_NUM must be a positive integer` | Set `IAXL_OMP_THREAD_NUM` to 1 or more. |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | The smallest `VLLM_CPU_OMP_THREADS_BIND` entry is too small. Lower `IAXL_RESERVED_CPU_NUM` or `IAXL_OMP_THREAD_NUM`. |
 | vLLM warns that libiomp or libtcmalloc is not in `LD_PRELOAD` | Start vLLM with `examples/kvshrink-vllm-serve.sh`. |
 | `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | Cross-node KV cache reuse needs a CUDA or XPU build. |

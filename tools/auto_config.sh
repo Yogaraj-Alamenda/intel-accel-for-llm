@@ -485,19 +485,14 @@ validate_omp_config() {
         echo "ERROR: IAXL_CPU_ZIP_THREADS must be a non-negative integer" >&2
         return 1
     fi
-    if ((IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM + IAXL_CPU_ZIP_THREADS == 0)); then
-        # No zip worker: KV blocks must be stored raw; OpenMP threads only do host copies.
-        if env_truthy "$IAXL_KV_COMPRESSION"; then
-            echo "ERROR: IAXL_KV_COMPRESSION=1 requires at least one zip backend; enable IAXL_QAT_ZIP_ENABLE/IAXL_IAA_ZIP_ENABLE/IAXL_CPU_ZIP_ENABLE or set IAXL_KV_COMPRESSION=0" >&2
-            return 1
-        fi
-        if ! [[ "$IAXL_OMP_THREAD_NUM" =~ ^[1-9][0-9]*$ ]]; then
-            echo "ERROR: IAXL_OMP_THREAD_NUM must be a positive integer" >&2
-            return 1
-        fi
-    elif ! [[ "$IAXL_OMP_THREAD_NUM" =~ ^[1-9][0-9]*$ ]] ||
-        ((IAXL_OMP_THREAD_NUM > IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM + IAXL_CPU_ZIP_THREADS)); then
-        echo "ERROR: IAXL_OMP_THREAD_NUM must be between 1 and IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM + IAXL_CPU_ZIP_THREADS" >&2
+    # No zip worker: KV blocks must be stored raw; OpenMP threads only do host copies.
+    if ((IAXL_QAT_INSTANCE_NUM + IAXL_IAA_INSTANCE_NUM + IAXL_CPU_ZIP_THREADS == 0)) &&
+        env_truthy "$IAXL_KV_COMPRESSION"; then
+        echo "ERROR: IAXL_KV_COMPRESSION=1 requires at least one zip backend; enable IAXL_QAT_ZIP_ENABLE/IAXL_IAA_ZIP_ENABLE/IAXL_CPU_ZIP_ENABLE or set IAXL_KV_COMPRESSION=0" >&2
+        return 1
+    fi
+    if ! [[ "$IAXL_OMP_THREAD_NUM" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: IAXL_OMP_THREAD_NUM must be a positive integer" >&2
         return 1
     fi
     if ((IAXL_OMP_THREAD_NUM + IAXL_RESERVED_CPU_NUM > min_rank_cpu_count)); then

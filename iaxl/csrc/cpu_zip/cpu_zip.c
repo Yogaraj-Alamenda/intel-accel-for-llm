@@ -10,6 +10,7 @@
 #include "env.h"
 
 typedef struct {
+    unsigned char *in;
     unsigned char *out;
     int len;
     int ready;
@@ -44,8 +45,9 @@ int cpu_zip_init(void) {
         return -1;
 
     for (int slot = 0; slot < g_slot_count; slot++) {
+        g_slots[slot].in = malloc((size_t)g_src_cap);
         g_slots[slot].out = malloc((size_t)g_buf_cap);
-        if (!g_slots[slot].out) {
+        if (!g_slots[slot].in || !g_slots[slot].out) {
             cpu_zip_shutdown();
             return -1;
         }
@@ -60,6 +62,12 @@ int cpu_zip_init(void) {
 int cpu_zip_num_slots(void) { return g_slot_count; }
 int cpu_zip_queue_depth(void) { return 1; }
 int cpu_zip_src_cap(void) { return g_src_cap; }
+
+void *cpu_zip_src_buf(int slot) {
+    if (!g_slots || slot < 0 || slot >= g_slot_count)
+        return NULL;
+    return g_slots[slot].in;
+}
 
 // Intel QPL only decodes a 4 KB history window, so shrink ours whenever an IAA worker may be the
 // one to decompress this chunk. kv_zip tags each block with the answer and routes accordingly.
@@ -130,8 +138,10 @@ int cpu_zip_wait(int slot, void **dest, int *len, int non_block) {
 
 void cpu_zip_shutdown(void) {
     if (g_slots) {
-        for (int slot = 0; slot < g_slot_count; slot++)
+        for (int slot = 0; slot < g_slot_count; slot++) {
+            free(g_slots[slot].in);
             free(g_slots[slot].out);
+        }
         free(g_slots);
     }
     g_slots = NULL;
