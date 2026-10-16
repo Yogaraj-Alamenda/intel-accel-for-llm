@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import time
 import torch
 import logging
 from typing import Dict, Optional, List, Tuple, Any
@@ -107,6 +108,8 @@ class KVFlow:
         self.cache_size_bytes = int(cache_size_gb * 1024**3)
 
         self.chunk_pool: Optional[ScratchPool] = None  # created on first put/get, once block shape is known
+        self._pending_puts: Dict[int, Task] = {}
+        self._pending_gets: Dict[int, Task] = {}
 
         self.mem = Mem(
             capacity_bytes=self.cache_size_bytes,
@@ -155,6 +158,22 @@ class KVFlow:
             if envs.IAXL_RDMA_ENABLE:
                 pool = self.chunk_pool.pool
                 _iqt.rdma_register_local(pool.data_ptr(), pool.nbytes, self.chunk_pool.block_bytes)
+
+    def _allocate(self, count: int, shape: Tuple[int, ...], dtype: torch.dtype) -> List[torch.Tensor]:
+        rounds, start = 0, 0.0
+        while (tensors := self.chunk_pool.allocate(count, shape, dtype)) is None:
+            if not (self._pending_puts or self._pending_gets):
+                raise RuntimeError(f"ScratchPool exhausted: need {count}, {self.chunk_pool.status()}")
+            if rounds == 1:
+                start = time.perf_counter()
+            rounds += 1
+            for wait_fn, pending in ((self.put_wait, self._pending_puts), (self.get_wait, self._pending_gets)):
+                for task in list(pending.values()):
+                    wait_fn({task.tensor_key: task}, wait=False)
+        if rounds > 1:
+            logger.warning("ScratchPool exhausted: waited %.3f ms (%d rounds) for %d blocks",
+                           (time.perf_counter() - start) * 1e3, rounds, count)
+        return tensors
 
     def _create_ctx(self, tensor, chunk_dim, direction, description, work_stream):
         if isinstance(tensor, RemoteTensor):
@@ -222,9 +241,7 @@ class KVFlow:
             if self._in_place:
                 cpu_tensors = [tensor[i] for i in chunk_indices]
             else:
-                cpu_tensors = self.chunk_pool.allocate(
-                    num_chunks, chunk_shape, tensor.dtype
-                )
+                cpu_tensors = self._allocate(num_chunks, chunk_shape, tensor.dtype)
 
             ctx = self._create_ctx(
                 tensor,
@@ -246,13 +263,15 @@ class KVFlow:
                 self.mem, label, tensor_key, chunk_labels, cpu_tensors, compress
             )
 
-            results[tensor_key] = Task(
+            results[tensor_key] = task = Task(
                 ctx=ctx,
                 cpu_tensors=None if self._in_place else cpu_tensors,
                 label=label,
                 tensor_key=tensor_key,
                 chunk_labels=chunk_labels,
             )
+            if not self._in_place:
+                self._pending_puts[id(task)] = task
 
         return results
 
@@ -272,21 +291,22 @@ class KVFlow:
             for key in keys_to_wait:
                 assert key in put_results, f"Key {key} not in put_results"
                 result = put_results[key]
-                assert result.ctx is not None, f"Task ctx is None for key {key}"
-                if not result.ctx.zip_is_complete():
+                if result.ctx is not None and not result.ctx.zip_is_complete():
                     return False
 
         for key in keys_to_wait:
             assert key in put_results, f"Key {key} not in put_results"
 
             result = put_results[key]
-            assert result.ctx is not None, f"Task ctx is None for key {key}"
+            if result.ctx is None:
+                continue
             result.ctx.zip_wait()
             result.ctx = None
 
             if not self._in_place:
                 self.chunk_pool.release(result.cpu_tensors)
                 result.cpu_tensors = None
+                del self._pending_puts[id(result)]
 
         return True
 
@@ -340,9 +360,7 @@ class KVFlow:
             if self._in_place:
                 cpu_tensors = [tensor[i] for i in chunk_indices]
             else:
-                cpu_tensors = self.chunk_pool.allocate(
-                    num_chunks, chunk_shape, tensor.dtype
-                )
+                cpu_tensors = self._allocate(num_chunks, chunk_shape, tensor.dtype)
 
             ctx = self._create_ctx(
                 tensor,
@@ -359,13 +377,15 @@ class KVFlow:
                 self.mem, label, tensor_key, chunk_labels, chunk_indices, cpu_tensors
             )
 
-            results[tensor_key] = Task(
+            results[tensor_key] = task = Task(
                 ctx=ctx,
                 cpu_tensors=None if self._in_place else cpu_tensors,
                 label=label,
                 tensor_key=tensor_key,
                 chunk_labels=chunk_labels,
             )
+            if not self._in_place:
+                self._pending_gets[id(task)] = task
 
         return results
 
@@ -402,18 +422,20 @@ class KVFlow:
                         )
                     return False
 
-            else:
-                if result.ctx is None:
-                    continue
+        for key in keys_to_wait:
+            result = get_results[key]
+            if result.ctx is None:
+                continue
 
-                result.ctx.unzip_wait()
-                result.ctx.xfer_wait()
+            result.ctx.unzip_wait()
+            result.ctx.xfer_wait()
 
-                result.ctx = None
+            result.ctx = None
 
-                if result.cpu_tensors is not None:
-                    self.chunk_pool.release(result.cpu_tensors)
-                    result.cpu_tensors = None
+            if result.cpu_tensors is not None:
+                self.chunk_pool.release(result.cpu_tensors)
+                result.cpu_tensors = None
+                del self._pending_gets[id(result)]
 
         return True
 

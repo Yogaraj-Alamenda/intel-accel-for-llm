@@ -293,8 +293,6 @@ class KVStoreService:
             wait = kv.put_wait if job.is_put else kv.get_wait
             for name in list(job.not_done):
                 if wait(job.tasks, [name], wait=False):
-                    if job.tasks[name].ctx is not None:  # get_wait(wait=False) only checks
-                        wait(job.tasks, [name], wait=True)
                     job.not_done.discard(name)
                     yield job_id, self.layer_idx[name], job.peer
             if not job.not_done:

@@ -3,7 +3,7 @@
 
 """Fixed-size pinned scratch pool: one big [num_blocks, *block_shape] tensor
 (IAXL_SCRATCH_POOL_SIZE_GB), blocks handed out as views. No growth: allocate()
-raises once the pool is exhausted.
+returns None once the pool is exhausted.
 
 Each block carries its slot as `tensor.block_idx`, which is also its offset in
 `pool` (register `pool` once for RDMA and use block_idx as the descriptor index).
@@ -43,10 +43,10 @@ class ScratchPool:
         return len(self._blocks)
 
     def allocate(self, count: int, shape: Optional[Sequence[int]] = None,
-                 dtype: Optional[torch.dtype] = None) -> List[torch.Tensor]:
+                 dtype: Optional[torch.dtype] = None) -> Optional[List[torch.Tensor]]:
         free = self._free
         if count > len(free):
-            raise RuntimeError(f"ScratchPool exhausted: need {count}, {len(free)}/{len(self._blocks)} free")
+            return None
         cut = len(free) - count  # not free[-count:], which is the whole list for count == 0
         idx = free[cut:]
         del free[cut:]

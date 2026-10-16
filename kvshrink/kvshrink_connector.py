@@ -571,7 +571,6 @@ class KVShrinkConnector(KVConnectorBase_V1):
             if async_load_layers == -1:
                 # Require all layers before marking the load finished.
                 if self._store().get_wait(get_results=tasks, wait=False):
-                    self._store().get_wait(get_results=tasks, wait=True)
                     del self._pending_load_tasks[req_id]
                     del self._pending_load_layers[req_id]
                     finished_recving.add(req_id)
@@ -582,9 +581,6 @@ class KVShrinkConnector(KVConnectorBase_V1):
                 if self._store().get_wait(
                     get_results=tasks, layer_names=first_n_layers, wait=False
                 ):
-                    self._store().get_wait(
-                        get_results=tasks, layer_names=first_n_layers, wait=True
-                    )
                     del self._pending_load_tasks[req_id]
                     del self._pending_load_layers[req_id]
                     self._early_promoted_tasks[req_id] = tasks
@@ -604,7 +600,6 @@ class KVShrinkConnector(KVConnectorBase_V1):
                     get_results=load_tasks, wait=False
                 ):
                     continue
-                self._store().get_wait(get_results=load_tasks, wait=True)
                 self._pending_load_tasks.pop(req_id, None)
                 self._pending_load_layers.pop(req_id, None)
                 self._early_promoted_tasks.pop(req_id, None)
