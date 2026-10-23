@@ -70,7 +70,7 @@ QAT compresses without verification unless the QAT library is built in strict mo
 | `IAXL_QATLIB` | Library | Verification |
 | --- | --- | --- |
 | `oot` (default) | QAT20 package built with `--disable-dc-strict-mode` | Off |
-| `intree` | System qatlib, always strict | On; each compression is also decompressed and checked by the device |
+| `intree` | qatlib (system, or built into `_lib`), always strict | On; each compression is also decompressed and checked by the device |
 
 ## Segments
 

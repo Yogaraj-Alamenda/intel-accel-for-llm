@@ -10,7 +10,7 @@ RUN CUDA_DIR=$(ls -d /usr/local/cuda-[0-9]*.[0-9]* 2>/dev/null | sort -V | tail 
         libboost-all-dev libudev-dev nasm yasm liblz4-dev libsqlite3-dev \
         zlib1g-dev libtcmalloc-minimal4 \
         uuid-dev libjson-c-dev \
-        build-essential cmake \
+        build-essential cmake autoconf automake autoconf-archive libtool libssl-dev \
         rdma-core libibverbs-dev librdmacm-dev libnuma-dev \
         $(apt-cache search "linux-headers-6.8.*-generic" | tail -n 1 | awk '{print $1}') \
         ${CUDA_VERSION:+cuda-nvml-dev-$CUDA_VERSION} \
@@ -21,15 +21,23 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
 # Keep build inputs outside the bind-mounted source tree for offline rebuilds.
+# qatlib (IAXL_QATLIB=intree) is built by iaxl/csrc/Makefile; match IAXL_QATLIB_VERSION to the host qatmgr.
+ARG IAXL_QATLIB_VERSION=26.02.0
 RUN mkdir -p /opt/iaxl-build-deps \
     && wget -q -O /opt/iaxl-build-deps/QAT20.L.1.2.30-00178.tar.gz \
         https://downloadmirror.intel.com/921047/QAT20.L.1.2.30-00178.tar.gz \
-    && git clone --depth 1 --branch v1.9.0 https://github.com/intel/qpl.git /opt/iaxl-build-deps/qpl
+    && git clone --depth 1 --branch v1.9.0 https://github.com/intel/qpl.git /opt/iaxl-build-deps/qpl \
+    && git clone --depth 1 --branch "$IAXL_QATLIB_VERSION" https://github.com/intel/qatlib.git \
+        "/opt/iaxl-build-deps/qatlib-$IAXL_QATLIB_VERSION"
+
+# cuda | xpu | cpu; DEVICE=cpu builds no RDMA (remote_pool), so UCX and NIXL are skipped.
+ARG DEVICE=cuda
 
 # Own prefix: Ubuntu's libucx0 1.12 (a libboost-mpi/openmpi dependency) lives in
 # /usr/lib/x86_64-linux-gnu and would shadow a UCX installed under /usr at runtime.
 # ld.so.conf.d/ucx.conf sorts before x86_64-linux-gnu.conf, so this UCX wins.
-RUN git clone https://github.com/openucx/ucx.git /opt/ucx && \
+RUN if [ "$DEVICE" = cpu ]; then exit 0; fi && \
+    git clone https://github.com/openucx/ucx.git /opt/ucx && \
     cd /opt/ucx && git checkout v1.21.0 && \
     ./autogen.sh && \
     ./contrib/configure-release-mt \
@@ -43,7 +51,8 @@ RUN git clone https://github.com/openucx/ucx.git /opt/ucx && \
     echo /usr/local/ucx/lib > /etc/ld.so.conf.d/ucx.conf && ldconfig
 ENV PATH=/usr/local/ucx/bin:$PATH
 
-RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
+RUN if [ "$DEVICE" = cpu ]; then exit 0; fi && \
+    git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
     cd /opt/nixl && \
     git checkout v1.2.0 && \
     meson setup build \
@@ -62,4 +71,3 @@ RUN echo "install idxd-config" \
     && ./configure CFLAGS='-g -O2' --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-docs \
     && make install \
     && rm -rf /idxd-config
-

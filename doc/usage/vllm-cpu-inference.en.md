@@ -6,15 +6,26 @@ This guide shows how to configure threads and CPU binding when vLLM runs inferen
 
 ## 1. Build
 
-A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available. `docker/Dockerfile.dev` builds GPU dependencies (UCX, NIXL), so the build may also be run directly in an environment that has CPU vLLM installed. Besides the Python build requirements, it needs a C/C++ compiler, CMake, NASM (for the QPL dependency, even with IAA disabled), SQLite, and zlib.
+A `DEVICE=cpu` build uses the same `KVStore`, codecs, and persist/evict APIs as GPU inference. It needs no CUDA, SYCL, GDRCopy, or NIXL, so DSA transfers and RDMA (`remote_pool`) are not available.
+
+As for GPU inference, build and start the container with `start.sh` from the repository root. Point it at the vLLM CPU release image and set `IAXL_QATLIB` to match the host QAT driver:
 
 ```bash
-python -m pip install -r requirements.txt
-DEVICE=cpu python -m pip install -e . --no-build-isolation                     # out-of-tree QAT driver package
-DEVICE=cpu IAXL_QATLIB=intree python -m pip install -e . --no-build-isolation # in-tree driver with system qatlib
+export DEVICE=cpu
+export IAXL_BASE_DOCKER_IMAGE=vllm/vllm-openai-cpu:v0.29.0
+export IAXL_DEV_DOCKER_IMAGE=vllm-iaxl-dev-cpu
+export IAXL_LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so
+export IAXL_QATLIB=intree # in-tree driver (qat_4xxx, VFs bound to vfio-pci); leave unset for the out-of-tree driver (/dev/qat_dev_processes)
+./start.sh
 ```
 
-The out-of-tree build also needs the Boost/Boost Regex, SSL, udev, and netlink development packages. Match the user-space library to the host driver: the out-of-tree runtime expects `/dev/qat_dev_processes`, while qatlib uses the host's VFIO setup.
+- `DEVICE=cpu` skips UCX and NIXL in the dev image, starts the container without GPU arguments, and builds IAXL with `DEVICE=cpu` on entry.
+- `IAXL_DEV_DOCKER_IMAGE` keeps the CPU image apart from the GPU one. `start.sh` reuses an existing image with that tag, so without it the CPU run would reuse the GPU image (or overwrite it with `--rebuild`).
+- `IAXL_LD_PRELOAD` is what the example and benchmark scripts prepend to `LD_PRELOAD`. vLLM's CPU backend wants libtcmalloc and libiomp5 preloaded, and the CPU image ships libiomp5 in `/opt/venv/lib` instead of the default `/usr/local/lib`.
+- With `IAXL_QATLIB=intree`, the build compiles qatlib from source into `_lib` when `pkg-config` finds no system qatlib (the Ubuntu 22.04 CPU image has none), and `start.sh` mounts the host `/run/qat`, so each rank gets its QAT instances from the host `qatmgr`. If the host qatlib is not `26.02.0`, `export IAXL_QATLIB_VERSION=<host version>` before `./start.sh --rebuild`. Without `qatmgr`, the first process reserves all QAT devices, so runs with more than one rank need it.
+
+> [!NOTE]
+> Without Docker, IAXL also builds in an environment that already has CPU vLLM installed. Install the packages that `docker/Dockerfile.dev` installs (except UCX and NIXL), then run `python -m pip install -r requirements.txt` and `DEVICE=cpu python -m pip install -e . --no-build-isolation`, with `IAXL_QATLIB=intree` for the in-tree driver.
 
 ## 2. CPU Binding
 
@@ -54,7 +65,7 @@ When choosing CPUs:
 | --- | --- |
 | `VLLM_CPU_KVCACHE_SPACE` | Live vLLM KV cache size in GiB. `IAXL_DDR_POOL_SIZE_GB` sizes the compressed KVShrink cache independently. |
 | `MAX_MODEL_LEN` | `--max-model-len` (default `32765`). Lower it when the CPU KV cache cannot hold one full-length request. |
-| `BLOCK_SIZE` | `--block-size` (default `16`). A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 4 MiB in `setvars.sh`). For larger blocks, raise both caps or set `IAXL_ZIP_SEGMENT_SIZE_KB` to compress each block in segments of that many KiB; then only each segment, shorter than twice that size, must fit. |
+| `BLOCK_SIZE` | `--block-size`, passed only when set. vLLM v0.29 defaults to `128` on CPU (`16` for MLA models) and needs a multiple of 32 otherwise. A CPU KV block holds `2 × num_kv_heads × block_size × head_size × dtype_bytes` bytes per layer and must fit in `IAXL_ZIP_SRC_CAP` and, compressed, in `IAXL_ZIP_DST_CAP` (both 4 MiB in `setvars.sh`). For larger blocks, raise both caps or set `IAXL_ZIP_SEGMENT_SIZE_KB` to compress each block in segments of that many KiB; then only each segment, shorter than twice that size, must fit. |
 | `IAXL_KV_DATA_SHUFFLE`, `IAXL_KV_LOSSY_TRUNC` | With both set to `0`, the codec compresses straight from the vLLM KV blocks and decompresses straight into them, with no staging copies. `setvars.sh` enables shuffle by default. Either one rewrites the codec input, so blocks are staged in scratch buffers. Shuffle improves the compression ratio at the cost of one extra pass over every block. |
 
 ## 5. Example
@@ -62,7 +73,7 @@ When choosing CPUs:
 This example runs two ranks on a host where NUMA node 0 has CPUs 0-63 and node 1 has CPUs 64-127, with one logical CPU per core:
 
 ```bash
-export DEVICE=cpu # start.sh passes it into the container, which builds IAXL on entry
+# With the exports from section 1
 ./start.sh
 
 # In the container shell opened by start.sh
@@ -76,7 +87,7 @@ export IAXL_OMP_THREAD_NUM=2
 ./examples/kvshrink-vllm-serve.sh
 ```
 
-The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as vLLM's CPU backend recommends.
+The script sources `setvars.sh` and prepends `IAXL_LD_PRELOAD` (libtcmalloc and libiomp5, as vLLM's CPU backend recommends) to `LD_PRELOAD`.
 
 ## 6. Verification
 
@@ -102,5 +113,5 @@ The script sources `setvars.sh`. It also preloads libiomp5 and libtcmalloc, as v
 | `cannot bind to IAXL_CPU_OMP_THREADS_BIND` | None of the listed CPUs is available to the process, for example because they are outside the container's cpuset. |
 | `IAXL_OMP_THREAD_NUM must be a positive integer` | Set `IAXL_OMP_THREAD_NUM` to 1 or more. |
 | `IAXL_OMP_THREAD_NUM (...) + reserved (...) exceeds the smallest rank CPU allocation` | The smallest `VLLM_CPU_OMP_THREADS_BIND` entry is too small. Lower `IAXL_RESERVED_CPU_NUM` or `IAXL_OMP_THREAD_NUM`. |
-| vLLM warns that libiomp or libtcmalloc is not in `LD_PRELOAD` | Start vLLM with `examples/kvshrink-vllm-serve.sh`. |
+| vLLM warns that libiomp or libtcmalloc is not in `LD_PRELOAD` | Start vLLM with `examples/kvshrink-vllm-serve.sh`, with `IAXL_LD_PRELOAD` set as in section 1. |
 | `RDMA (remote_pool) needs NIXL, which DEVICE=cpu builds do not link` | Cross-node KV cache reuse needs a CUDA or XPU build. |

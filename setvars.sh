@@ -15,7 +15,8 @@ $TOP_DIR/tools/setup_system.sh
 # ---- Build ------------------------------------------------------------------
 export DEVICE=${DEVICE:-cuda}                 # Build backend: cuda | xpu | cpu (vLLM CPU inference)
 export IAXL_CMAKE_ARGS=${IAXL_CMAKE_ARGS:-""} # Extra cmake flags, e.g. "-DENABLE_NVTX=OFF"
-# export IAXL_QATLIB=intree                   # Optional: link system qatlib (in-tree driver); unset = out-of-tree QAT20 package
+# export IAXL_QATLIB=intree                   # Optional: qatlib for the in-tree driver (system qatlib if pkg-config finds it, else built into _lib); unset = out-of-tree QAT20 package
+# export IAXL_QATLIB_VERSION=26.02.0          # Optional: qatlib tag built into _lib for IAXL_QATLIB=intree; match the host qatmgr
 export NVIDIA_RUNTIME=${NVIDIA_RUNTIME:-}     # Set to "none" to skip the nvidia docker runtime/gpus args (e.g. on a storage-only node without GPUs)
 
 # ---- Feature switches -------------------------------------------------------
@@ -152,6 +153,9 @@ else
 fi
 export OMP_MAX_ACTIVE_LEVELS=2
 validate_omp_config "$MIN_RANK_CPU_COUNT" || return 1 2>/dev/null || exit 1
+# Prepended to LD_PRELOAD by the example and benchmark scripts. The vLLM CPU image ships libiomp5 in
+# its venv instead: IAXL_LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so
+export IAXL_LD_PRELOAD=${IAXL_LD_PRELOAD:-/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so}
 
 # ---- Intel DSA (host<->device copy accelerator, CUDA only) ------------------
 export IAXL_DSA_GD_RESET_ON_DESTROY=${IAXL_DSA_GD_RESET_ON_DESTROY:-0} # Large BAR with stable tensor VAs can keep this off for better performance (0/1)
@@ -194,7 +198,9 @@ ENV_VARS=(
     TP_SIZE
     DEVICE
     IAXL_QATLIB
+    IAXL_QATLIB_VERSION
     IAXL_VERSION
+    IAXL_LD_PRELOAD
 )
 
 case "$DEVICE" in
@@ -221,6 +227,10 @@ for var in "${ENV_VARS[@]}"; do
 done
 DOCKER_RUN_ARGS+=("-e" "HF_HOME=/_data/hf_home")
 DOCKER_RUN_ARGS+=("-v" "$PWD/_data:/_data")
+# qatlib (in-tree driver) shares the host's QAT VFs through the host qatmgr socket.
+if [[ -d /run/qat ]]; then
+    DOCKER_RUN_ARGS+=("-v" "/run/qat:/run/qat")
+fi
 if [[ -d "$MODEL" ]]; then
     MODEL_DIR=$(realpath "$MODEL")
     DOCKER_RUN_ARGS+=("-v" "$MODEL_DIR:$MODEL_DIR:ro")

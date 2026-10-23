@@ -1,6 +1,7 @@
 #!/bin/bash -e
 # NVIDIA_RUNTIME=none ./start.sh  -> skip nvidia docker runtime/gpus args (e.g. on a storage-only node)
 # ./start.sh --rebuild            -> rebuild the dev image even if it already exists
+# DEVICE=cpu ./start.sh           -> vLLM CPU inference; also set the CPU base image (see doc/usage/vllm-cpu-inference.en.md)
 REBUILD=0
 for arg in "$@"; do
     case "$arg" in
@@ -15,6 +16,8 @@ source setvars.sh
 if [[ $REBUILD == 1 ]] || ! docker image inspect "$IAXL_DEV_DOCKER_IMAGE" >/dev/null 2>&1; then
     docker build -f docker/Dockerfile.dev -t "$IAXL_DEV_DOCKER_IMAGE" . \
         --build-arg "BASE=$IAXL_BASE_DOCKER_IMAGE" \
+        --build-arg "DEVICE=$DEVICE" \
+        --build-arg IAXL_QATLIB_VERSION \
         --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy
 fi
 

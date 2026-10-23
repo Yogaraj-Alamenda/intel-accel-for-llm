@@ -88,7 +88,8 @@ else()
 endif()
 
 # IAXL_QATLIB (optional): oot (default when unset/empty) = build the out-of-tree
-# QAT20 package into _lib, intree = system qatlib for the in-tree kernel driver.
+# QAT20 package into _lib, intree = qatlib for the in-tree kernel driver: the system
+# qatlib when pkg-config finds it, else qatlib IAXL_QATLIB_VERSION built into _lib.
 if(NOT DEFINED IAXL_QATLIB)
     set(IAXL_QATLIB "$ENV{IAXL_QATLIB}")
 endif()
@@ -99,15 +100,27 @@ endif()
 if(IAXL_QATLIB STREQUAL "intree")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(QATLIB QUIET qatlib)
-    if(NOT QATLIB_FOUND)
-        message(FATAL_ERROR "IAXL_QATLIB=intree but qatlib was not found by pkg-config")
+    if(QATLIB_FOUND)
+        find_library(QAT_LIBRARY qat HINTS "${QATLIB_LIBDIR}" REQUIRED)
+        find_library(USDM_LIBRARY usdm HINTS "${QATLIB_LIBDIR}" REQUIRED)
+        set(QAT_INCLUDE_DIR "${QATLIB_INCLUDEDIR}/qat")
+        set(QAT_LINK_LIBS ${QAT_LIBRARY} ${USDM_LIBRARY})
+        add_custom_target(qat_userspace_libs)
+        message(STATUS "QAT user space: system qatlib ${QATLIB_VERSION} (${QAT_LIBRARY})")
+    else()
+        set(QAT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/_build/qatlib/install/include/qat")
+        set(QAT_USERSPACE_LIBS "${IAXL_LIB_DIR}/libqat.so" "${IAXL_LIB_DIR}/libusdm.so"
+                               "${QAT_INCLUDE_DIR}/cpa.h")
+        add_custom_command(
+            OUTPUT ${QAT_USERSPACE_LIBS}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${IAXL_LIB_DIR}"
+            COMMAND make -C "${IAXL_CSRC_DIR}" DEVICE=${DEVICE} IAXL_QATLIB=intree qat-userspace
+            COMMENT "Building Intel qatlib user-space libraries"
+            VERBATIM)
+        add_custom_target(qat_userspace_libs DEPENDS ${QAT_USERSPACE_LIBS})
+        set(QAT_LINK_LIBS qat usdm)
+        message(STATUS "QAT user space: qatlib built from source (${IAXL_LIB_DIR})")
     endif()
-    find_library(QAT_LIBRARY qat HINTS "${QATLIB_LIBDIR}" REQUIRED)
-    find_library(USDM_LIBRARY usdm HINTS "${QATLIB_LIBDIR}" REQUIRED)
-    set(QAT_INCLUDE_DIR "${QATLIB_INCLUDEDIR}/qat")
-    set(QAT_LINK_LIBS ${QAT_LIBRARY} ${USDM_LIBRARY})
-    add_custom_target(qat_userspace_libs)
-    message(STATUS "QAT user space: in-tree qatlib ${QATLIB_VERSION} (${QAT_LIBRARY})")
 elseif(IAXL_QATLIB STREQUAL "oot")
     set(QAT_USERSPACE_LIBS "${IAXL_LIB_DIR}/libqat_s.so" "${IAXL_LIB_DIR}/libusdm_drv_s.so")
     add_custom_command(
