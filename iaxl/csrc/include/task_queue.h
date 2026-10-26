@@ -95,10 +95,13 @@ class TaskQueue {
     // Pins to IAXL_CPU_OMP_THREADS_BIND ("0-7,16"); threads spawned afterwards inherit it.
     static void bind_cpus() {
         const char *spec = env_str("IAXL_CPU_OMP_THREADS_BIND", nullptr);
-        if (!spec)
-            return;
         cpu_set_t cpus;
         CPU_ZERO(&cpus);
+        if (!spec) {
+            if (sched_getaffinity(0, sizeof(cpus), &cpus) == 0)
+                warn_if_oversubscribed(CPU_COUNT(&cpus), "inherited affinity");
+            return;
+        }
         for (const char *p = spec;; ++p) {
             char *end;
             long first = strtol(p, &end, 10);
@@ -116,6 +119,20 @@ class TaskQueue {
         }
         IAXL_CHECK(pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus) == 0,
                    "cannot bind to IAXL_CPU_OMP_THREADS_BIND");
+        warn_if_oversubscribed(CPU_COUNT(&cpus), "IAXL_CPU_OMP_THREADS_BIND");
+    }
+
+    // Warns once per process when IAXL threads get fewer CPUs than IAXL_OMP_THREAD_NUM.
+    static void warn_if_oversubscribed(int cpu_count, const char *source) {
+        static std::once_flag warned;
+        std::call_once(warned, [&] {
+            if (cpu_count < envs.IAXL_OMP_THREAD_NUM)
+                fprintf(stderr,
+                        "[iaxl] WARNING: IAXL threads have %d CPU(s) (%s), but "
+                        "IAXL_OMP_THREAD_NUM=%d; compression workers will be oversubscribed "
+                        "and throughput may degrade.\n",
+                        cpu_count, source, envs.IAXL_OMP_THREAD_NUM);
+        });
     }
 
   private:

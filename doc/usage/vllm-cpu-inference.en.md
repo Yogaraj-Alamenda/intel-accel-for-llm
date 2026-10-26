@@ -38,14 +38,14 @@ Two variables split each rank's CPUs between vLLM and IAXL:
 
 - **Format:** both variables contain one entry per rank, separated by `|`. Each entry is a CPU list such as `0-61` or `0-7,16`.
 - **Rank order:** entry `r` belongs to global rank `r = dp_rank × TP_SIZE + tp_rank`, so each list needs `TP_SIZE × DP_SIZE` entries.
-- **Default:** `KVSHRINK_CPU_OMP_THREADS_BIND` defaults to `VLLM_CPU_OMP_THREADS_BIND`. In that case IAXL threads share the inference cores, so set it explicitly for CPU inference.
+- **Default:** with `DEVICE=cpu` and `VLLM_CPU_OMP_THREADS_BIND` unset, `setvars.sh` picks the layout from the host topology. Rank `r` gets the `r`-th socket, or the `r`-th NUMA node that has CPUs when there are more ranks than sockets. A whole socket keeps prefill fast. vLLM places a rank's memory on the NUMA node of its first CPU, so with sub-NUMA clustering (several nodes per socket) some decode threads read memory from a sibling node. Binding a rank to a single NUMA node instead lowers TPOT a little but raises TTFT more, since prefill gets fewer cores. The top `IAXL_CPU_CORES` (default `2`) physical cores of the socket or node, with their SMT siblings, go to IAXL, and vLLM gets one logical CPU on each remaining core. The CPU layout is the same whether QAT is enabled or not. Each rank uses the QAT devices on its socket or node, else those on the node's socket, else any (`KVSHRINK_QAT_DEVICES`); ranks that fall back to the same devices split them, or share them when there are fewer devices than ranks. `IAXL_OMP_THREAD_NUM` defaults to the number of IAXL CPUs per rank. `setvars.sh` prints a `KVShrink CPU rank <r>: ...` line per rank. If there are more ranks than NUMA nodes, it warns and falls back to an even CPU split shared by vLLM and IAXL; set the variables yourself then. Any variable you set is kept, and `setvars.sh` warns when a rank's IAXL CPUs overlap its vLLM CPUs.
 - **At startup:** the connector exports the rank's entry as `IAXL_CPU_OMP_THREADS_BIND`, and IAXL pins all of its threads to those CPUs.
 
-When choosing CPUs:
+When choosing CPUs yourself:
 
 - For each rank, keep the vLLM and IAXL entries disjoint.
 - Put both entries on the same NUMA node. Choose the rank's QAT devices (`KVSHRINK_QAT_DEVICES`) on that node too.
-- Use one logical CPU per physical core. `lscpu -e=CPU,CORE,NODE` shows the mapping.
+- Give vLLM one logical CPU per physical core. `lscpu -e=CPU,CORE,NODE` shows the mapping.
 - Give IAXL at least `IAXL_OMP_THREAD_NUM` CPUs per rank.
 
 ## 3. Thread Settings
@@ -70,7 +70,7 @@ When choosing CPUs:
 
 ## 5. Example
 
-This example runs two ranks on a host where NUMA node 0 has CPUs 0-63 and node 1 has CPUs 64-127, with one logical CPU per core:
+With the defaults, setting the rank count is enough; `setvars.sh` (sourced by the script) picks the CPUs and QAT devices:
 
 ```bash
 # With the exports from section 1
@@ -78,14 +78,10 @@ This example runs two ranks on a host where NUMA node 0 has CPUs 0-63 and node 1
 
 # In the container shell opened by start.sh
 export TP_SIZE=2
-export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"       # vLLM inference
-export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # IAXL threads
-export KVSHRINK_QAT_DEVICES="0,1|2,3"                # QAT devices on each rank's NUMA node
-export IAXL_CPU_ZIP_ENABLE=0
-export IAXL_OMP_THREAD_NUM=2
-
 ./examples/kvshrink-vllm-serve.sh
 ```
+
+Check the `KVShrink CPU rank <r>: ...` lines that `setvars.sh` prints for the CPUs and QAT devices it picked. To use a different layout, export `VLLM_CPU_OMP_THREADS_BIND`, `KVSHRINK_CPU_OMP_THREADS_BIND`, `KVSHRINK_QAT_DEVICES` and `IAXL_OMP_THREAD_NUM` before running the script (see [section 2](#2-cpu-binding)).
 
 The script sources `setvars.sh` and prepends `IAXL_LD_PRELOAD` (libtcmalloc and libiomp5, as vLLM's CPU backend recommends) to `LD_PRELOAD`.
 

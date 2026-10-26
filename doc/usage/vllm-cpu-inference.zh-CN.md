@@ -38,14 +38,14 @@ export IAXL_QATLIB=intree # in-tree 驱动（qat_4xxx，VF 绑定到 vfio-pci）
 
 - **格式**：两个变量都是每个 rank 一项，用 `|` 分隔。每项是一个 CPU 列表，例如 `0-61` 或 `0-7,16`。
 - **rank 顺序**：第 `r` 项对应全局 rank `r = dp_rank × TP_SIZE + tp_rank`，因此每个变量需要 `TP_SIZE × DP_SIZE` 项。
-- **默认值**：`KVSHRINK_CPU_OMP_THREADS_BIND` 默认等于 `VLLM_CPU_OMP_THREADS_BIND`。这时 IAXL 线程和推理线程共用同一批核，所以 CPU 推理时要显式设置它。
+- **默认值**：`DEVICE=cpu` 且未设置 `VLLM_CPU_OMP_THREADS_BIND` 时，`setvars.sh` 根据主机拓扑自动配置。第 `r` 个 rank 分到第 `r` 个 socket；rank 数多于 socket 数时，改为第 `r` 个有 CPU 的 NUMA 节点。整个 socket 能让 prefill 保持较快。vLLM 把 rank 的内存放在其第一个 CPU 所在的 NUMA 节点上，所以开启 sub-NUMA clustering（每个 socket 多个节点）时，部分 decode 线程会读取同一 socket 上另一个节点的内存。若改为每个 rank 只绑定一个 NUMA 节点，TPOT 会略有降低，但 prefill 可用的核变少，TTFT 增加更多。该 socket 或节点最后 `IAXL_CPU_CORES`（默认 `2`）个物理核及其 SMT 兄弟线程给 IAXL，其余每个物理核取一个逻辑 CPU 给 vLLM。无论是否启用 QAT，CPU 布局都相同。每个 rank 优先使用所在 socket 或节点上的 QAT 设备，没有则用该节点所在 socket 上的，再没有则用任意设备（`KVSHRINK_QAT_DEVICES`）；回退到同一组设备的多个 rank 会把设备分开使用，设备数少于 rank 数时则共用。`IAXL_OMP_THREAD_NUM` 默认等于每个 rank 的 IAXL CPU 数。`setvars.sh` 会为每个 rank 打印一行 `KVShrink CPU rank <r>: ...`。rank 数多于 NUMA 节点数时，会给出警告并回退为平均分配 CPU（vLLM 与 IAXL 共用），这时请自行设置这些变量。已设置的变量保持不变；某个 rank 的 IAXL CPU 与 vLLM CPU 有重叠时，`setvars.sh` 会给出警告。
 - **启动时**：connector 把本 rank 对应的项导出为 `IAXL_CPU_OMP_THREADS_BIND`，IAXL 的所有线程都绑定到这些 CPU 上。
 
-选择 CPU 时：
+自行选择 CPU 时：
 
 - 同一个 rank 的 vLLM 项和 IAXL 项不能有重叠。
 - 两项放在同一个 NUMA 节点上，该 rank 的 QAT 设备（`KVSHRINK_QAT_DEVICES`）也选在这个节点。
-- 每个物理核只用一个逻辑 CPU，可以用 `lscpu -e=CPU,CORE,NODE` 查看对应关系。
+- vLLM 每个物理核只用一个逻辑 CPU，可以用 `lscpu -e=CPU,CORE,NODE` 查看对应关系。
 - 每个 rank 给 IAXL 的 CPU 数量不少于 `IAXL_OMP_THREAD_NUM`。
 
 ## 3. 线程配置
@@ -70,7 +70,7 @@ export IAXL_QATLIB=intree # in-tree 驱动（qat_4xxx，VF 绑定到 vfio-pci）
 
 ## 5. 示例
 
-下面的例子在两个 NUMA 节点上运行两个 rank：节点 0 是 CPU 0-63，节点 1 是 CPU 64-127，每个物理核一个逻辑 CPU。
+使用默认配置时只需设置 rank 数，脚本 source 的 `setvars.sh` 会自动选择 CPU 和 QAT 设备：
 
 ```bash
 # 先执行第 1 节中的 export
@@ -78,14 +78,10 @@ export IAXL_QATLIB=intree # in-tree 驱动（qat_4xxx，VF 绑定到 vfio-pci）
 
 # 在 start.sh 打开的容器 shell 中执行
 export TP_SIZE=2
-export VLLM_CPU_OMP_THREADS_BIND="0-61|64-125"       # vLLM 推理
-export KVSHRINK_CPU_OMP_THREADS_BIND="62-63|126-127" # IAXL 线程
-export KVSHRINK_QAT_DEVICES="0,1|2,3"                # 每个 rank 所在 NUMA 节点上的 QAT 设备
-export IAXL_CPU_ZIP_ENABLE=0
-export IAXL_OMP_THREAD_NUM=2
-
 ./examples/kvshrink-vllm-serve.sh
 ```
+
+`setvars.sh` 会打印 `KVShrink CPU rank <r>: ...`，列出为每个 rank 选择的 CPU 和 QAT 设备。如需其他布局，请在运行脚本前 export `VLLM_CPU_OMP_THREADS_BIND`、`KVSHRINK_CPU_OMP_THREADS_BIND`、`KVSHRINK_QAT_DEVICES` 和 `IAXL_OMP_THREAD_NUM`（见[第 2 节](#2-cpu-绑核)）。
 
 该脚本会 source `setvars.sh`，并把 `IAXL_LD_PRELOAD`（按照 vLLM CPU 后端的推荐预加载 libtcmalloc 和 libiomp5）加到 `LD_PRELOAD` 前面。
 

@@ -200,26 +200,31 @@ cpu_auto_detect() {
     echo "$result"
 }
 
-qat_auto_detect() {
-    local tp_size=${1:-${TP_SIZE:-}}
-    local path driver devices_per_rank extra_devices next_device rank count offset pci numa group result
-    local -a qat_devices=() indices=() pci_devices=() rank_groups=()
+qat_pf_devices() {  # QAT PF PCI addresses, sorted (= IAXL device index order)
+    local path driver
 
-    validate_tp_size "$tp_size" || return 1
     for path in /sys/bus/pci/devices/*; do
         [[ -r "$path/class" && -L "$path/driver" ]] || continue
         [[ "$(<"$path/class")" == "0x0b4000" ]] || continue
         driver=$(basename "$(readlink -f "$path/driver")")
         [[ "$driver" != *vf* ]] || continue
         [[ "$driver" =~ (qat|4xxx|420xx|c6xx|c3xxx|200xx|dh895xcc) ]] || continue
-        qat_devices+=("${path##*/}")
-    done
+        echo "${path##*/}"
+    done | LC_ALL=C sort
+}
+
+qat_auto_detect() {
+    local tp_size=${1:-${TP_SIZE:-}}
+    local devices_per_rank extra_devices next_device rank count offset pci numa group result
+    local -a qat_devices=() indices=() pci_devices=() rank_groups=()
+
+    validate_tp_size "$tp_size" || return 1
+    mapfile -t qat_devices < <(qat_pf_devices)
 
     if ((${#qat_devices[@]} == 0)); then
         echo "ERROR: no QAT devices bound to a supported PF driver were found" >&2
         return 1
     fi
-    mapfile -t qat_devices < <(printf '%s\n' "${qat_devices[@]}" | LC_ALL=C sort)
     if ((${#qat_devices[@]} < tp_size)); then
         echo "ERROR: TP_SIZE=$tp_size requires at least $tp_size QAT devices, but only ${#qat_devices[@]} were found" >&2
         return 1
@@ -247,6 +252,150 @@ qat_auto_detect() {
 
     result=$(IFS='|'; echo "${rank_groups[*]}")
     echo "$result"
+}
+
+# vLLM CPU inference layout. Rank r gets the r-th socket, or the r-th NUMA node when ranks
+# outnumber sockets (a whole socket keeps prefill fast). Its top iaxl_cores physical cores, with
+# SMT siblings, go to IAXL; vLLM gets one logical CPU on each remaining core. With use_qat=1, a
+# rank uses the QAT devices on its socket/node, else on its socket, else any (split between ranks
+# when there are enough, else shared); QAT never changes the CPU layout.
+# Sets CPU_INFER_BIND, CPU_IAXL_BIND, CPU_QAT_DEVICES (one '|' entry per rank) and
+# CPU_IAXL_MIN_CPUS. Returns 1, setting nothing, when the host has too few sockets/nodes or cores.
+cpu_inference_auto_detect() {
+    local tp_size=$1 iaxl_cores=$2 use_qat=$3
+    local node_dir node cpu siblings pci numa rank i pool pool_size count start kind unit unit_desc iaxl_min=0
+    local -a nodes=() units=() cores=() iaxl_cpus=() devices=() infer=() iaxl=() qat=() lines=() rank_pools=()
+    local -A node_cores=() node_socket=() core_siblings=() seen=() unit_nodes=() unit_socket=()
+    local -A pool_devices=() pool_ranks=() pool_next=()
+
+    validate_tp_size "$tp_size" || return 1
+    [[ "$iaxl_cores" =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: IAXL_CPU_CORES must be a positive integer, got '$iaxl_cores'" >&2
+        return 1
+    }
+
+    for node_dir in /sys/devices/system/node/node[0-9]*; do
+        [[ -r "$node_dir/cpulist" && -n "$(<"$node_dir/cpulist")" ]] || continue
+        node=${node_dir##*node}
+        for cpu in $(expand_cpu_list "$(<"$node_dir/cpulist")"); do
+            siblings=$(<"/sys/devices/system/cpu/cpu$cpu/topology/thread_siblings_list")
+            [[ -n "${seen[$siblings]:-}" ]] && continue
+            seen[$siblings]=1
+            node_cores[$node]+="$cpu "
+            core_siblings[$cpu]=$siblings
+            node_socket[$node]=$(<"/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id")
+        done
+    done
+    mapfile -t nodes < <(printf '%s\n' "${!node_cores[@]}" | sort -n)
+
+    for kind in socket numa; do
+        unit_nodes=()
+        unit_socket=()
+        for node in "${nodes[@]}"; do
+            [[ "$kind" == socket ]] && unit=${node_socket[$node]} || unit=$node
+            unit_nodes[$unit]+="$node "
+            unit_socket[$unit]=${node_socket[$node]}
+        done
+        mapfile -t units < <(printf '%s\n' "${!unit_nodes[@]}" | sort -n)
+        ((${#units[@]} >= tp_size)) && break
+    done
+    ((${#units[@]} >= tp_size)) || return 1
+
+    if [[ "$use_qat" == 1 ]]; then
+        # QAT device indices per NUMA node, per socket and overall.
+        i=0
+        while read -r pci; do
+            numa=$(<"/sys/bus/pci/devices/$pci/numa_node")
+            if [[ -n "${node_cores[$numa]:-}" ]]; then # numa_node -1 or a CPU-less node
+                pool_devices[numa$numa]+="$i "
+                pool_devices[socket${node_socket[$numa]}]+="$i "
+            fi
+            pool_devices[all]+="$i "
+            i=$((i + 1))
+        done < <(qat_pf_devices)
+        for ((rank = 0; rank < tp_size; rank++)); do
+            unit=${units[$rank]}
+            for pool in "$kind$unit" "socket${unit_socket[$unit]}" all; do
+                [[ -n "${pool_devices[$pool]:-}" ]] && break
+            done
+            rank_pools+=("$pool")
+            pool_ranks[$pool]=$((${pool_ranks[$pool]:-0} + 1))
+        done
+    fi
+
+    for ((rank = 0; rank < tp_size; rank++)); do
+        unit=${units[$rank]}
+        mapfile -t cores < <(for node in ${unit_nodes[$unit]}; do
+            printf '%s\n' ${node_cores[$node]}
+        done | sort -n)
+        if ((${#cores[@]} <= iaxl_cores)); then
+            echo "ERROR: $kind $unit has ${#cores[@]} physical cores, need more than IAXL_CPU_CORES=$iaxl_cores" >&2
+            return 1
+        fi
+        iaxl_cpus=()
+        for cpu in "${cores[@]: -iaxl_cores}"; do
+            mapfile -t -O "${#iaxl_cpus[@]}" iaxl_cpus < <(expand_cpu_list "${core_siblings[$cpu]}")
+        done
+        ((iaxl_min == 0 || ${#iaxl_cpus[@]} < iaxl_min)) && iaxl_min=${#iaxl_cpus[@]}
+        infer+=("$(compress_cpu_list "${cores[@]:0:${#cores[@]}-iaxl_cores}")")
+        iaxl+=("$(compress_cpu_list "${iaxl_cpus[@]}")")
+
+        qat+=("")
+        if [[ "$use_qat" == 1 && -n "${pool_devices[all]:-}" ]]; then
+            pool=${rank_pools[$rank]}
+            read -r -a devices <<<"${pool_devices[$pool]}"
+            pool_size=${pool_ranks[$pool]}
+            i=${pool_next[$pool]:-0}
+            pool_next[$pool]=$((i + 1))
+            if ((${#devices[@]} >= pool_size)); then
+                count=$((${#devices[@]} / pool_size))
+                start=$((i * count + (i < ${#devices[@]} % pool_size ? i : ${#devices[@]} % pool_size)))
+                ((i < ${#devices[@]} % pool_size)) && count=$((count + 1))
+                qat[-1]=$(IFS=,; echo "${devices[*]:start:count}")
+            else
+                qat[-1]=${devices[i % ${#devices[@]}]} # fewer devices than ranks: share them
+            fi
+        fi
+        if [[ "$kind" == socket ]]; then
+            unit_desc="socket $unit (NUMA $(echo ${unit_nodes[$unit]} | tr ' ' ','))"
+        else
+            unit_desc="NUMA $unit (socket ${unit_socket[$unit]})"
+        fi
+        lines+=("KVShrink CPU rank $rank: $unit_desc vLLM=${infer[-1]} IAXL=${iaxl[-1]}${qat[-1]:+ QAT=${qat[-1]}${pool:+ ($pool)}}")
+    done
+    printf '%s\n' "${lines[@]}" >&2
+
+    CPU_INFER_BIND=$(IFS='|'; echo "${infer[*]}")
+    CPU_IAXL_BIND=$(IFS='|'; echo "${iaxl[*]}")
+    CPU_IAXL_MIN_CPUS=$iaxl_min
+    CPU_QAT_DEVICES=""
+    [[ "$use_qat" == 1 && -n "${pool_devices[all]:-}" ]] && CPU_QAT_DEVICES=$(IFS='|'; echo "${qat[*]}")
+    return 0
+}
+
+# Warns about ranks whose IAXL CPUs overlap their vLLM CPUs.
+cpu_bind_overlap_warn() {
+    local infer_bind=$1 iaxl_bind=$2 tp_size=$3
+    local rank cpu
+    local -a infer=() iaxl=() overlapping=()
+    local -A used=()
+
+    IFS='|' read -r -a infer <<<"$infer_bind"
+    IFS='|' read -r -a iaxl <<<"$iaxl_bind"
+    for ((rank = 0; rank < tp_size && rank < ${#iaxl[@]}; rank++)); do
+        used=()
+        for cpu in $(expand_cpu_list "${infer[$rank]:-}"); do
+            used[$cpu]=1
+        done
+        for cpu in $(expand_cpu_list "${iaxl[$rank]}"); do
+            if [[ -n "${used[$cpu]:-}" ]]; then
+                overlapping+=("$rank")
+                break
+            fi
+        done
+    done
+    ((${#overlapping[@]} == 0)) && return 0
+    echo "WARNING: KVSHRINK_CPU_OMP_THREADS_BIND overlaps VLLM_CPU_OMP_THREADS_BIND on rank(s) $(IFS=,; echo "${overlapping[*]}"); IAXL threads will compete with vLLM inference threads (see doc/usage/vllm-cpu-inference.en.md)" >&2
 }
 
 dsa_auto_detect() {

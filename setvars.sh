@@ -38,9 +38,24 @@ export TP_SIZE="${TP_SIZE:-2}"            # Tensor-parallel worker count
 export DP_SIZE="${DP_SIZE:-1}"            # Data-parallel group count
 # Total workers = one per (dp, tp) pair; CPU/QAT/DSA specs are indexed per worker.
 NUM_WORKERS=$((TP_SIZE * DP_SIZE))
+if [[ "$DEVICE" == cpu && -z "${VLLM_CPU_OMP_THREADS_BIND:-}" ]]; then
+    # CPU inference: one socket (or NUMA node) per rank, nearby QAT devices, dedicated IAXL cores.
+    export IAXL_CPU_CORES=${IAXL_CPU_CORES:-2} # Physical cores per rank reserved for IAXL threads (DEVICE=cpu)
+    if cpu_inference_auto_detect "$NUM_WORKERS" "$IAXL_CPU_CORES" "$(env_truthy "$IAXL_QAT_ZIP_ENABLE" && echo 1 || echo 0)"; then
+        VLLM_CPU_OMP_THREADS_BIND=$CPU_INFER_BIND
+        KVSHRINK_CPU_OMP_THREADS_BIND=${KVSHRINK_CPU_OMP_THREADS_BIND:-$CPU_IAXL_BIND}
+        [[ -n "$CPU_QAT_DEVICES" ]] && KVSHRINK_QAT_DEVICES=${KVSHRINK_QAT_DEVICES:-$CPU_QAT_DEVICES}
+        IAXL_OMP_THREAD_NUM=${IAXL_OMP_THREAD_NUM:-$CPU_IAXL_MIN_CPUS}
+    else
+        echo "WARNING: no socket or NUMA node for each of the $NUM_WORKERS ranks; vLLM and IAXL share an even CPU split. Set VLLM_CPU_OMP_THREADS_BIND / KVSHRINK_CPU_OMP_THREADS_BIND / KVSHRINK_QAT_DEVICES for a better layout" >&2
+    fi
+fi
 VLLM_CPU_OMP_THREADS_BIND="${VLLM_CPU_OMP_THREADS_BIND:-$(cpu_auto_detect "$NUM_WORKERS")}" || return 1 2>/dev/null || exit 1
 export VLLM_CPU_OMP_THREADS_BIND # Per-worker CPU affinity (one entry per global rank)
 export KVSHRINK_CPU_OMP_THREADS_BIND="${KVSHRINK_CPU_OMP_THREADS_BIND:-$VLLM_CPU_OMP_THREADS_BIND}" # Per-worker CPUs for iaxl threads (one entry per global rank)
+if [[ "$DEVICE" == cpu ]]; then
+    cpu_bind_overlap_warn "$VLLM_CPU_OMP_THREADS_BIND" "$KVSHRINK_CPU_OMP_THREADS_BIND" "$NUM_WORKERS"
+fi
 rank_cpu_counts "$VLLM_CPU_OMP_THREADS_BIND" "$NUM_WORKERS" || return 1 2>/dev/null || exit 1
 case "${IAXL_QAT_ZIP_ENABLE,,}" in
     1|true|yes|on)
@@ -73,6 +88,7 @@ printf '%s\n' \
     "  IAXL_CPU_ZIP_ENABLE=$IAXL_CPU_ZIP_ENABLE" \
     "  IAXL_DSA_GD_ENABLE=$IAXL_DSA_GD_ENABLE" \
     "  VLLM_CPU_OMP_THREADS_BIND=$VLLM_CPU_OMP_THREADS_BIND" \
+    "  IAXL_CPU_CORES=${IAXL_CPU_CORES:-n/a}" \
     "  KVSHRINK_CPU_OMP_THREADS_BIND=$KVSHRINK_CPU_OMP_THREADS_BIND" \
     "  KVSHRINK_QAT_DEVICES=${KVSHRINK_QAT_DEVICES:-disabled}" \
     "  KVSHRINK_DSA_DEVICES=${KVSHRINK_DSA_DEVICES:-disabled}" \

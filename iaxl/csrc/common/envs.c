@@ -10,10 +10,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 #include "env.h"
 
 static const char *qat_devices_get(void) {
@@ -113,18 +109,6 @@ __attribute__((constructor(101))) void envs_init(void) {
         printed = 1;
 
         int cpus = available_cpu_count();
-
-#ifdef _OPENMP
-
-        int omp_threads = omp_get_max_threads();
-        if (cpus < envs.IAXL_OMP_THREAD_NUM) {
-            fprintf(stderr,
-                    "[iaxl] WARNING: only %d CPU(s) available to this process, "
-                "but IAXL_OMP_THREAD_NUM=%d (omp_max_threads=%d); compression "
-                "workers will be oversubscribed and throughput may degrade.\n",
-                cpus, envs.IAXL_OMP_THREAD_NUM, omp_threads);
-        }
-#endif
 
          printf("[iaxl] config: qat_zip=%s iaa_zip=%s cpu_zip=%s qat_instances=%d "
              "iaa_instances=%d cpu_zip_threads=%d "

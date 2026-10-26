@@ -76,8 +76,9 @@ Common settings in `setvars.sh`. Other variables in `setvars.sh` are advanced se
 | vLLM | `MODEL` | `Qwen/Qwen3-32B` | Hugging Face model ID or local model path |
 | vLLM | `TP_SIZE` | `2` | Required; number of Tensor Parallel workers. CPU, QAT, and DSA resources are configured based on this value |
 | vLLM | `DP_SIZE` | `1` | Number of Data Parallel groups; total ranks = `TP_SIZE × DP_SIZE` |
-| vLLM | `VLLM_CPU_OMP_THREADS_BIND` | Auto-detected from GPU NUMA topology | CPUs for vLLM, one `\|`-separated CPU list per rank |
-| IAXL | `KVSHRINK_CPU_OMP_THREADS_BIND` | Same as `VLLM_CPU_OMP_THREADS_BIND` | CPUs for IAXL threads, one entry per rank. Set it for CPU inference; see the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md) |
+| vLLM | `VLLM_CPU_OMP_THREADS_BIND` | Auto-detected from GPU NUMA topology; with `DEVICE=cpu`, one socket per rank (one NUMA node when there are more ranks than sockets) | CPUs for vLLM, one `\|`-separated CPU list per rank |
+| IAXL | `KVSHRINK_CPU_OMP_THREADS_BIND` | Same as `VLLM_CPU_OMP_THREADS_BIND`; with `DEVICE=cpu`, the top `IAXL_CPU_CORES` cores (with SMT siblings) of each rank's socket or node | CPUs for IAXL threads, one entry per rank; see the [vLLM CPU inference guide](doc/usage/vllm-cpu-inference.en.md) |
+| IAXL | `IAXL_CPU_CORES` | `2` | `DEVICE=cpu` only: physical cores per rank reserved for IAXL threads when `setvars.sh` picks the CPU layout |
 | IAXL | `IAXL_RDMA_ENABLE` | `0` | Use a remote KVStore daemon over RDMA (`0`/`1`); see [cross-node KV Cache reuse](#cross-node-kv-cache-reuse) |
 | IAXL | `IAXL_RDMA_DAEMON_NIC_IPS` | unset | Daemon RDMA NIC IPs; required when `IAXL_RDMA_ENABLE=1` |
 | IAXL | `IAXL_RDMA_CLIENT_NIC_IPS` | unset | Client RDMA NIC IPs; required on the client when `IAXL_RDMA_ENABLE=1` |
