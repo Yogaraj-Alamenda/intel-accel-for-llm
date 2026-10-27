@@ -134,10 +134,25 @@ class KVShrinkConnector(KVConnectorBase_V1, SupportsHMA):
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 spec = next(iter(spec.kv_cache_specs.values()))
             self.groups.append((isinstance(spec, MambaSpec), list(group.layer_names)))
+        self.has_mamba = any(is_mamba for is_mamba, _ in self.groups)
+        if self.has_mamba and vllm_config.cache_config.mamba_cache_mode != "align":
+            raise ValueError(
+                "KVShrinkConnector on hybrid models requires "
+                "mamba_cache_mode='align', got "
+                f"{vllm_config.cache_config.mamba_cache_mode!r}"
+            )
         block_sizes = {g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups}
         assert len(block_sizes) == 1, block_sizes
         self.block_size = block_sizes.pop()
-        self.has_mamba = any(is_mamba for is_mamba, _ in self.groups)
+        logger.info(
+            "KVShrinkConnector(%s): block_size=%d, has_mamba=%s, "
+            "mamba_cache_mode=%r, prefix caching=%s",
+            role.name,
+            self.block_size,
+            self.has_mamba,
+            vllm_config.cache_config.mamba_cache_mode,
+            vllm_config.cache_config.enable_prefix_caching,
+        )
         self.num_mamba_layers = sum(
             len(names) for is_mamba, names in self.groups if is_mamba
         )

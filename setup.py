@@ -133,5 +133,8 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": CMakeBuild},
     package_data=get_package_data(),
+    entry_points={
+        "vllm.general_plugins": ["kvshrink = kvshrink.vllm_patch:register"],
+    },
     zip_safe=False,
 )

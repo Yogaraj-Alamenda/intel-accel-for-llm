@@ -17,13 +17,6 @@ device_args=(--gpu-memory-utilization 0.8)
 # Unset BLOCK_SIZE keeps vLLM's default: 128 on CPU (16 for MLA models), 16 or the attention backend's preference on GPU.
 [[ -n "$BLOCK_SIZE" ]] && device_args+=(--block-size "$BLOCK_SIZE")
 
-# Hybrid GDN/Mamba models need prefix caching: with it off vLLM sets
-# mamba_cache_mode to 'none' and no block-aligned state is kept.
-cache_args=(--no-enable-prefix-caching)
-if [[ "${KVSHRINK_HYBRID:-0}" == "1" ]]; then
-    cache_args=(--enable-prefix-caching)
-fi
-
 vllm serve "$MODEL" \
     --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both"}' \
     --trust-remote-code \
@@ -31,5 +24,5 @@ vllm serve "$MODEL" \
     "${device_args[@]}" \
     --max-model-len "${MAX_MODEL_LEN:-32765}" \
     --port "${PORT:-8000}" \
-    "${cache_args[@]}" \
+    --no-enable-prefix-caching \
     2>&1 | tee log.kvshrink-vllm
