@@ -23,8 +23,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace kv_pool {
@@ -36,38 +36,14 @@ double now_timestamp() {
     return std::chrono::duration<double>(now.time_since_epoch()).count();
 }
 
+struct FreeDeleter {
+    void operator()(char *p) const { free(p); }
+};
+using Buffer = std::unique_ptr<char, FreeDeleter>;
+
 struct SubEntry {
-    char *data = nullptr;
+    Buffer data;
     size_t size = 0;
-
-    ~SubEntry() {
-        if (data) {
-            free(data);
-            data = nullptr;
-        }
-    }
-
-    SubEntry(const SubEntry &) = delete;
-    SubEntry &operator=(const SubEntry &) = delete;
-
-    SubEntry() = default;
-
-    SubEntry(SubEntry &&other) noexcept : data(other.data), size(other.size) {
-        other.data = nullptr;
-        other.size = 0;
-    }
-
-    SubEntry &operator=(SubEntry &&other) noexcept {
-        if (this != &other) {
-            if (data)
-                free(data);
-            data = other.data;
-            size = other.size;
-            other.data = nullptr;
-            other.size = 0;
-        }
-        return *this;
-    }
 };
 
 struct EntryGroup {
@@ -77,6 +53,11 @@ struct EntryGroup {
     EntryGroup *unpersisted_prev = nullptr;
     EntryGroup *unpersisted_next = nullptr;
     bool is_persisted = false;
+    // A copy was written to / read from storage. Unlike is_persisted it survives re-puts: keys are
+    // content-addressed, so the disk copy stays valid and the Record entry may be kept on eviction.
+    bool on_disk = false;
+    // Set once the group key has been submitted to the Record (all entries stored).
+    bool committed = false;
 
     const std::string *group_key_ptr = nullptr;
 
@@ -84,6 +65,8 @@ struct EntryGroup {
     double last_access = 0.0;
 
     std::unordered_map<std::string, SubEntry> entries;
+    // Buffers replaced while a reader held this group; freed with the group or the next put.
+    std::vector<Buffer> retired;
 
     size_t total_bytes() const {
         size_t total = 0;
@@ -110,46 +93,79 @@ struct EntryGroup {
 
     EntryGroup() { entries.reserve((size_t)envs.IAXL_CACHE_CACHEGROUP_SIZE); }
 
+    // Held by shared_ptr (readers share it) and linked into intrusive lists: never copied or moved.
     EntryGroup(const EntryGroup &) = delete;
     EntryGroup &operator=(const EntryGroup &) = delete;
-
-    EntryGroup(EntryGroup &&other) noexcept
-        : lru_prev(other.lru_prev), lru_next(other.lru_next),
-          unpersisted_prev(other.unpersisted_prev), unpersisted_next(other.unpersisted_next),
-          is_persisted(other.is_persisted), group_key_ptr(other.group_key_ptr),
-          created_at(other.created_at), last_access(other.last_access),
-          entries(std::move(other.entries)) {
-        other.lru_prev = nullptr;
-        other.lru_next = nullptr;
-        other.unpersisted_prev = nullptr;
-        other.unpersisted_next = nullptr;
-        other.group_key_ptr = nullptr;
-    }
-
-    EntryGroup &operator=(EntryGroup &&other) noexcept {
-        if (this != &other) {
-            lru_prev = other.lru_prev;
-            lru_next = other.lru_next;
-            unpersisted_prev = other.unpersisted_prev;
-            unpersisted_next = other.unpersisted_next;
-            is_persisted = other.is_persisted;
-            group_key_ptr = other.group_key_ptr;
-            created_at = other.created_at;
-            last_access = other.last_access;
-            entries = std::move(other.entries);
-            other.lru_prev = nullptr;
-            other.lru_next = nullptr;
-            other.unpersisted_prev = nullptr;
-            other.unpersisted_next = nullptr;
-            other.group_key_ptr = nullptr;
-        }
-        return *this;
-    }
 };
 
 } // namespace
 
 class Mem::Impl {
+    // Groups are shared: a reader (Mem::acquire) holds the groups it reads, so a group evicted or
+    // cleared meanwhile is freed only when the last reader releases it. Eviction never waits.
+    using GroupMap = std::unordered_map<std::string, std::shared_ptr<EntryGroup>>;
+    using CacheNode = GroupMap::node_type;
+
+    // Frees evicted groups on its own thread, so eviction does not stall the caller (the IAXL
+    // worker, which also compresses and decompresses). It only ever destroys what it is given.
+    class Reclaimer {
+      public:
+        Reclaimer() : thread_([this] { run(); }) {}
+        ~Reclaimer() {
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                stop_ = true;
+            }
+            cv_.notify_one();
+            thread_.join();
+        }
+        void push(std::vector<CacheNode> &nodes) {
+            if (nodes.empty())
+                return;
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                for (auto &node : nodes)
+                    queue_.push_back(std::move(node));
+            }
+            nodes.clear();
+            cv_.notify_one();
+        }
+
+      private:
+        void run() {
+            std::unique_lock<std::mutex> lk(mutex_);
+            while (true) {
+                cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
+                if (queue_.empty())
+                    return;
+                std::vector<CacheNode> batch;
+                batch.swap(queue_);
+                lk.unlock();
+                batch.clear();
+                lk.lock();
+            }
+        }
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        std::vector<CacheNode> queue_;
+        bool stop_ = false;
+        std::thread thread_;
+    };
+
+    // Groups removed from cache_ under mutex_. Declared before the lock in each caller, so they
+    // reach the reclaimer after mutex_ is released.
+    struct Dropped {
+        explicit Dropped(Reclaimer &reclaimer) : reclaimer(reclaimer) {}
+        ~Dropped() { reclaimer.push(nodes); }
+        Reclaimer &reclaimer;
+        std::vector<CacheNode> nodes;
+        std::vector<std::string> record_removals;
+    };
+
+    // Over budget, eviction frees this much below capacity, so it runs once per batch of puts
+    // (and issues one Record removal per batch) instead of on every put.
+    static constexpr size_t kEvictBatchBytes = 64ull << 20;
+
   public:
     explicit Impl(size_t capacity_bytes, Storage *storage, Record *record)
         : capacity_bytes_(capacity_bytes), storage_(storage), record_(record), current_bytes_(0),
@@ -197,14 +213,26 @@ class Mem::Impl {
                    "Mem::put: keys and sizes must have the same length");
         IAXL_CHECK(unzip_sizes.empty() || keys.size() == unzip_sizes.size(),
                    "Mem::put: unzip sizes must be empty or match keys length");
+        Dropped dropped(reclaimer_); // handed to the reclaimer after the lock is released
         std::lock_guard<std::mutex> lock(mutex_);
         put_unlocked(keys, std::move(data_ptrs), sizes, unzip_sizes);
+        enforce_capacity_unlocked(dropped);
     }
 
     std::vector<std::pair<const char *, size_t>> get(const std::vector<std::string> &keys,
                                                      bool allow_using_omp) {
         std::lock_guard<std::mutex> lock(mutex_);
         return get_unlocked(keys, allow_using_omp);
+    }
+
+    std::vector<Mem::BufferRef> acquire(const std::vector<std::string> &keys,
+                                        bool allow_using_omp) {
+        Dropped dropped(reclaimer_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto refs = lookup_unlocked(keys, allow_using_omp);
+        // Storage reloads may have pushed the pool over budget; the returned refs stay valid.
+        enforce_capacity_unlocked(dropped);
+        return refs;
     }
 
     std::vector<bool> has(const std::vector<std::string> &keys) {
@@ -219,8 +247,9 @@ class Mem::Impl {
 
     std::vector<std::tuple<std::string, size_t>> evict_groups(size_t max_groups) {
         wait_deletion_guard();
+        Dropped dropped(reclaimer_);
         std::lock_guard<std::mutex> lock(mutex_);
-        return evict_groups_unlocked(max_groups);
+        return evict_groups_unlocked(max_groups, dropped);
     }
 
     void put_unlocked(const std::vector<std::string> &keys, std::vector<char *> &&data_ptrs,
@@ -232,11 +261,22 @@ class Mem::Impl {
             put_one_unlocked(keys[i], data_ptrs[i], sizes[i], unzip_size, now);
             data_ptrs[i] = nullptr;
         }
+        commit_complete_groups_unlocked(keys);
     }
 
+    // Raw pointers stay valid only until the entry is evicted or replaced; see acquire().
     std::vector<std::pair<const char *, size_t>> get_unlocked(const std::vector<std::string> &keys,
                                                               bool allow_using_omp) {
-        std::vector<std::pair<const char *, size_t>> results(keys.size());
+        auto refs = lookup_unlocked(keys, allow_using_omp);
+        std::vector<std::pair<const char *, size_t>> results(refs.size());
+        for (size_t i = 0; i < refs.size(); ++i)
+            results[i] = {refs[i].data.get(), refs[i].size};
+        return results;
+    }
+
+    std::vector<Mem::BufferRef> lookup_unlocked(const std::vector<std::string> &keys,
+                                                bool allow_using_omp) {
+        std::vector<Mem::BufferRef> results(keys.size());
         double now = now_timestamp();
 
         std::vector<size_t> miss_indices;
@@ -244,7 +284,7 @@ class Mem::Impl {
 
         for (size_t i = 0; i < keys.size(); ++i) {
             results[i] = get_one_unlocked(keys[i], now);
-            if (results[i].first == nullptr) {
+            if (!results[i].data) {
                 miss_indices.push_back(i);
             }
         }
@@ -320,13 +360,23 @@ class Mem::Impl {
 
                 hits_in_storage_.fetch_add(1, std::memory_order_relaxed);
 
-                auto [group_key_sv, tensor_key_sv] = parse_full_label(keys[item.index]);
+                auto [group_key_sv, _] = parse_full_label(keys[item.index]);
                 auto it = cache_.find(std::string(group_key_sv));
-                SubEntry *sub = it->second.find(tensor_key_sv);
-                results[item.index] = {sub->data, sub->size};
+                // Reloaded only because the Record marks it persisted, so it is already recorded.
+                it->second->committed = true;
             } else {
 
                 misses_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // Resolve after every insert: a key repeated in `keys` is loaded twice, and the second
+        // put replaces the first buffer.
+        for (const auto &item : loaded_data) {
+            if (item.buffer) {
+                auto [group_key_sv, tensor_key_sv] = parse_full_label(keys[item.index]);
+                const auto &group = cache_.find(std::string(group_key_sv))->second;
+                results[item.index] = ref(group, group->find(tensor_key_sv));
             }
         }
 
@@ -343,7 +393,7 @@ class Mem::Impl {
                 if (tensor_key_sv.empty()) {
                     results.push_back(true);
                 } else {
-                    const SubEntry *sub = it->second.find(tensor_key_sv);
+                    const SubEntry *sub = it->second->find(tensor_key_sv);
                     results.push_back(sub != nullptr && sub->data != nullptr);
                 }
             } else {
@@ -362,7 +412,7 @@ class Mem::Impl {
             const std::string &group_key = *group->group_key_ptr;
             for (const auto &[tensor_key, sub] : group->entries) {
                 std::string full_label = make_full_label(group_key, tensor_key);
-                results.emplace_back(std::move(full_label), sub.data, sub.size);
+                results.emplace_back(std::move(full_label), sub.data.get(), sub.size);
             }
             groups_returned++;
             group = group->unpersisted_next;
@@ -379,7 +429,7 @@ class Mem::Impl {
             const std::string &group_key = *group->group_key_ptr;
             for (const auto &[tensor_key, sub] : group->entries) {
                 std::string full_label = make_full_label(group_key, tensor_key);
-                results.emplace_back(std::move(full_label), sub.data, sub.size);
+                results.emplace_back(std::move(full_label), sub.data.get(), sub.size);
             }
             groups_returned++;
             group = group->lru_next;
@@ -397,7 +447,8 @@ class Mem::Impl {
             auto [group_key_sv, _] = parse_full_label(key);
             auto it = cache_.find(std::string(group_key_sv));
             if (it != cache_.end()) {
-                EntryGroup &group = it->second;
+                EntryGroup &group = *it->second;
+                group.on_disk = true;
                 if (!group.is_persisted) {
                     group.is_persisted = true;
                     unpersisted_remove(&group);
@@ -427,41 +478,54 @@ class Mem::Impl {
 
     bool is_evict_enabled() const { return evict_enabled_.load(std::memory_order_acquire); }
 
+    void set_entries_per_group(size_t count, const std::string &label) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (label.empty()) {
+            entries_per_group_ = count;
+        } else {
+            validate_label_component(label);
+            label_entries_per_group_[label] = count;
+        }
+    }
+
+    size_t entries_per_group(const std::string &label) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!label.empty()) {
+            auto it = label_entries_per_group_.find(label);
+            if (it != label_entries_per_group_.end())
+                return it->second;
+        }
+        return entries_per_group_;
+    }
+
     size_t evict_to_size(size_t target_bytes) {
         if (!evict_enabled_.load(std::memory_order_acquire)) {
             return 0;
         }
         wait_deletion_guard();
+        Dropped dropped(reclaimer_);
         std::lock_guard<std::mutex> lock(mutex_);
-        return evict_unlocked(target_bytes);
+        return evict_unlocked(target_bytes, dropped);
     }
 
     size_t force_evict_to_size(size_t target_bytes) {
         wait_deletion_guard();
+        Dropped dropped(reclaimer_);
         std::lock_guard<std::mutex> lock(mutex_);
-        return evict_unlocked(target_bytes);
+        return evict_unlocked(target_bytes, dropped);
     }
 
     size_t remove(const std::string &key) {
         wait_deletion_guard();
+        Dropped dropped(reclaimer_);
         std::lock_guard<std::mutex> lock(mutex_);
-        return remove_unlocked(key);
-    }
-
-    size_t remove_unlocked(const std::string &key) {
         auto [group_key_sv, _] = parse_full_label(key);
         auto it = cache_.find(std::string(group_key_sv));
-        if (it != cache_.end()) {
-            EntryGroup &group = it->second;
-            size_t bytes = group.total_bytes();
-            current_bytes_ -= bytes;
-            total_entries_ -= group.entry_count();
-            lru_remove(&group);
-            unpersisted_remove(&group);
-            cache_.erase(it);
-            return bytes;
-        }
-        return 0;
+        if (it == cache_.end())
+            return 0;
+        size_t bytes = drop_group_unlocked(it->second.get(), dropped);
+        finish_eviction_unlocked(dropped);
+        return bytes;
     }
 
     size_t size() const {
@@ -487,6 +551,7 @@ class Mem::Impl {
     uint64_t misses() const { return misses_.load(std::memory_order_relaxed); }
     uint64_t puts() const { return puts_.load(std::memory_order_relaxed); }
     uint64_t evictions() const { return evictions_.load(std::memory_order_relaxed); }
+    uint64_t evicted_bytes() const { return evicted_bytes_.load(std::memory_order_relaxed); }
 
     uint64_t total_unzip_bytes() const {
         return total_unzip_bytes_.load(std::memory_order_relaxed);
@@ -505,13 +570,16 @@ class Mem::Impl {
         misses_.store(0, std::memory_order_relaxed);
         puts_.store(0, std::memory_order_relaxed);
         evictions_.store(0, std::memory_order_relaxed);
+        evicted_bytes_.store(0, std::memory_order_relaxed);
         total_unzip_bytes_.store(0, std::memory_order_relaxed);
         total_zip_bytes_.store(0, std::memory_order_relaxed);
     }
 
     void clear() {
+        GroupMap old; // freed outside mutex_ (groups held by readers outlive it)
         std::lock_guard<std::mutex> lock(mutex_);
-        cache_.clear();
+        old.swap(cache_);
+        cache_.reserve(old.bucket_count());
         current_bytes_ = 0;
         total_entries_ = 0;
         lru_head_.lru_next = &lru_head_;
@@ -531,6 +599,8 @@ class Mem::Impl {
                 " MB capacity. Increase IAXL_DDR_POOL_SIZE_GB or enable cache eviction.");
         }
 
+        Buffer buffer(data);
+
         if (unzip_size > 0) {
             total_unzip_bytes_.fetch_add(unzip_size, std::memory_order_relaxed);
             total_zip_bytes_.fetch_add(size, std::memory_order_relaxed);
@@ -542,17 +612,21 @@ class Mem::Impl {
         auto it = cache_.find(group_key);
         if (it != cache_.end()) {
 
-            EntryGroup &group = it->second;
+            EntryGroup &group = *it->second;
+            // Reader refs are only taken under mutex_, so a count of 1 means no reader holds it.
+            const bool read_by_others = it->second.use_count() > 1;
+            if (!read_by_others)
+                group.retired.clear();
             SubEntry *sub = group.find(tensor_key_sv);
             if (sub) {
                 current_bytes_ -= sub->size;
-                if (sub->data)
-                    free(sub->data);
-                sub->data = data;
+                if (read_by_others)
+                    group.retired.push_back(std::move(sub->data));
+                sub->data = std::move(buffer);
                 sub->size = size;
             } else {
                 SubEntry &new_sub = group.get_or_create(tensor_key);
-                new_sub.data = data;
+                new_sub.data = std::move(buffer);
                 new_sub.size = size;
                 total_entries_++;
 
@@ -578,12 +652,8 @@ class Mem::Impl {
 
             decltype(cache_.begin()) new_it;
             try {
-                auto [it2, inserted] =
-                    cache_.emplace(std::piecewise_construct, std::forward_as_tuple(group_key),
-                                   std::forward_as_tuple());
-                new_it = it2;
+                new_it = cache_.emplace(group_key, std::make_shared<EntryGroup>()).first;
             } catch (const std::bad_alloc &) {
-                free(data);
                 throw std::runtime_error(
                     "[Mem] failed to allocate new cache group '" + group_key +
                     "'. DDR pool usage: " + std::to_string(current_bytes_ / (1024 * 1024)) +
@@ -592,11 +662,11 @@ class Mem::Impl {
                     " groups. System memory exhausted. "
                     "Increase IAXL_DDR_POOL_SIZE_GB or enable cache eviction.");
             }
-            EntryGroup &group = new_it->second;
+            EntryGroup &group = *new_it->second;
             group.group_key_ptr = &new_it->first;
 
             SubEntry &sub = group.get_or_create(tensor_key);
-            sub.data = data;
+            sub.data = std::move(buffer);
             sub.size = size;
             group.created_at = now;
             group.last_access = now;
@@ -617,31 +687,112 @@ class Mem::Impl {
         }
 
         puts_.fetch_add(1, std::memory_order_relaxed);
+    }
 
-        if (capacity_bytes_ > 0 && current_bytes_ > capacity_bytes_) {
-            static std::atomic<uint64_t> warn_count{0};
-            if ((warn_count.fetch_add(1) % 10000) == 0) {
-                fprintf(stderr, "[Mem] WARNING: Over budget! %zu MB > %zu MB capacity\n",
-                        current_bytes_ / (1024 * 1024), capacity_bytes_ / (1024 * 1024));
+    // Entries a group ("label:chunk_id") needs before it is recorded; 0 = caller-managed record.
+    size_t expected_entries_unlocked(const std::string &group_key) const {
+        if (!label_entries_per_group_.empty()) {
+            auto [label, _] = parse_group_key(group_key);
+            auto it = label_entries_per_group_.find(std::string(label));
+            if (it != label_entries_per_group_.end())
+                return it->second;
+        }
+        return entries_per_group_;
+    }
+
+    // Record groups only once every expected entry is in memory, so a Record lookup never
+    // claims a block whose (asynchronously compressed) data has not landed yet. Submits are
+    // issued under mutex_, so their order on the Record's FIFO queue matches eviction removals.
+    void commit_complete_groups_unlocked(const std::vector<std::string> &keys) {
+        if (!record_ || (entries_per_group_ == 0 && label_entries_per_group_.empty()))
+            return;
+        std::vector<std::string> ready;
+        for (const auto &key : keys) {
+            auto [group_key_sv, _] = parse_full_label(key);
+            auto it = cache_.find(std::string(group_key_sv));
+            if (it == cache_.end())
+                continue;
+            EntryGroup &group = *it->second;
+            const size_t expected = expected_entries_unlocked(it->first);
+            if (expected > 0 && !group.committed && group.entries.size() >= expected) {
+                group.committed = true;
+                ready.push_back(it->first);
             }
+        }
+        if (!ready.empty())
+            record_->submit_group_keys(ready);
+    }
+
+    // Removes one group from memory. Groups not on disk are queued for Record removal so the
+    // lookup stops reporting them; on-disk groups stay recorded and reload from storage.
+    size_t drop_group_unlocked(EntryGroup *group, Dropped &dropped) {
+        std::string group_key = *group->group_key_ptr;
+        size_t bytes = group->total_bytes();
+
+        current_bytes_ -= bytes;
+        total_entries_ -= group->entry_count();
+        lru_remove(group);
+        unpersisted_remove(group);
+        if (!group->on_disk)
+            dropped.record_removals.push_back(group_key);
+
+        dropped.nodes.push_back(cache_.extract(group_key));
+        return bytes;
+    }
+
+    size_t evict_group_unlocked(EntryGroup *group, Dropped &dropped) {
+        size_t bytes = drop_group_unlocked(group, dropped);
+        evictions_.fetch_add(1, std::memory_order_relaxed);
+        evicted_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+        return bytes;
+    }
+
+    // Queues the Record removals while still under mutex_, so they stay ordered with submits.
+    void finish_eviction_unlocked(Dropped &dropped) {
+        if (record_ && !dropped.record_removals.empty())
+            record_->remove(dropped.record_removals, /*wait=*/false);
+        dropped.record_removals.clear();
+    }
+
+    // Once the pool exceeds capacity_bytes_, evicts least-recently-used groups until it is a
+    // small batch (kEvictBatchBytes, at most 1/16 of capacity) below it. The groups a put just
+    // wrote are the most recently used and go last.
+    void enforce_capacity_unlocked(Dropped &dropped) {
+        if (capacity_bytes_ == 0 || current_bytes_ <= capacity_bytes_)
+            return;
+        if (evict_enabled_.load(std::memory_order_acquire) &&
+            deletion_guard_count_.load(std::memory_order_acquire) == 0) {
+            evict_unlocked(capacity_bytes_ - std::min(kEvictBatchBytes, capacity_bytes_ / 16),
+                           dropped);
+            return;
+        }
+        static std::atomic<uint64_t> warn_count{0};
+        if ((warn_count.fetch_add(1) % 10000) == 0) {
+            fprintf(stderr, "[Mem] WARNING: Over budget! %zu MB > %zu MB capacity (eviction off)\n",
+                    current_bytes_ / (1024 * 1024), capacity_bytes_ / (1024 * 1024));
         }
     }
 
-    std::pair<const char *, size_t> get_one_unlocked(const std::string &full_label, double now) {
+    // A ref shares ownership of the whole group, whose count sits next to the group itself.
+    static Mem::BufferRef ref(const std::shared_ptr<EntryGroup> &group, const SubEntry *sub) {
+        return {std::shared_ptr<const char>(group, sub->data.get()), sub->size};
+    }
+
+    Mem::BufferRef get_one_unlocked(const std::string &full_label, double now) {
         auto [group_key_sv, tensor_key_sv] = parse_full_label(full_label);
         auto it = cache_.find(std::string(group_key_sv));
         if (it != cache_.end()) {
-            EntryGroup &group = it->second;
+            EntryGroup &group = *it->second;
             SubEntry *sub = group.find(tensor_key_sv);
             if (sub && sub->data) {
                 group.last_access = now;
                 lru_remove(&group);
                 lru_push_back(&group);
                 hits_.fetch_add(1, std::memory_order_relaxed);
-                return {sub->data, sub->size};
+                return ref(it->second, sub);
             }
         }
-        return {nullptr, 0};
+        return {};
     }
 
     std::vector<std::tuple<std::string, size_t>> persist_groups_unlocked(size_t max_groups) {
@@ -651,122 +802,75 @@ class Mem::Impl {
                       << std::endl;
             std::abort();
         }
-        auto entries_to_persist = get_unpersisted_unlocked(max_groups);
-        if (entries_to_persist.empty()) {
+
+        // Only complete groups are persisted, and a group counts as persisted only if every
+        // entry was saved; otherwise its Record row would outlive the DRAM copy on eviction
+        // while storage lacks some layers.
+        std::vector<EntryGroup *> saved;
+        std::vector<std::tuple<std::string, size_t>> persisted_groups;
+        EntryGroup *group = unpersisted_head_.unpersisted_next;
+        while (group != &unpersisted_head_ && saved.size() < max_groups) {
+            EntryGroup *next = group->unpersisted_next;
+            if (group->committed || expected_entries_unlocked(*group->group_key_ptr) == 0) {
+                const std::string &group_key = *group->group_key_ptr;
+                bool all_saved = true;
+                size_t bytes = 0;
+                for (const auto &[tensor_key, sub] : group->entries) {
+                    if (!storage_->save(make_full_label(group_key, tensor_key), sub.data.get(),
+                                        sub.size)) {
+                        all_saved = false;
+                        break;
+                    }
+                    bytes += sub.size;
+                }
+                if (all_saved) {
+                    saved.push_back(group);
+                    persisted_groups.emplace_back(group_key, bytes);
+                }
+            }
+            group = next;
+        }
+        if (saved.empty()) {
             return {};
         }
 
-        std::vector<std::tuple<std::string, size_t>> persisted_groups;
-        std::vector<std::string> persisted_full_labels;
-        std::unordered_map<std::string, size_t> group_bytes;
-
-        for (const auto &entry_tuple : entries_to_persist) {
-            const auto &full_label = std::get<0>(entry_tuple);
-            const char *data = std::get<1>(entry_tuple);
-            size_t size = std::get<2>(entry_tuple);
-
-            if (storage_->save(full_label, data, size)) {
-                persisted_full_labels.push_back(full_label);
-                auto [group_key_sv, _] = parse_full_label(full_label);
-                group_bytes[std::string(group_key_sv)] += size;
-            }
+        std::vector<std::string> group_keys;
+        group_keys.reserve(saved.size());
+        for (EntryGroup *g : saved) {
+            g->is_persisted = true;
+            g->on_disk = true;
+            unpersisted_remove(g);
+            group_keys.push_back(*g->group_key_ptr);
         }
-
-        mark_persisted_unlocked(persisted_full_labels);
-
         if (record_) {
-            std::vector<std::string> group_keys;
-            group_keys.reserve(persisted_full_labels.size());
-            std::unordered_set<std::string> seen;
-            seen.reserve(persisted_full_labels.size());
-            for (const auto &fl : persisted_full_labels) {
-                auto [gk_sv, _] = parse_full_label(fl);
-                std::string gk(gk_sv);
-                if (seen.insert(gk).second) {
-                    group_keys.push_back(std::move(gk));
-                }
-            }
             record_->mark_persisted(group_keys);
-        }
-
-        for (const auto &pair : group_bytes) {
-            persisted_groups.emplace_back(pair.first, pair.second);
         }
 
         return persisted_groups;
     }
 
-    std::vector<std::tuple<std::string, size_t>> evict_groups_unlocked(size_t max_groups) {
+    std::vector<std::tuple<std::string, size_t>> evict_groups_unlocked(size_t max_groups,
+                                                                       Dropped &dropped) {
         if (!evict_enabled_) {
             return {};
         }
 
-        auto entries_to_evict = get_lru_oldest_unlocked(max_groups);
-        if (entries_to_evict.empty()) {
-            return {};
-        }
-
-        std::vector<std::string> unique_full_labels;
-        std::vector<std::string> unique_group_keys;
-        std::unordered_map<std::string, size_t> group_bytes;
-        std::unordered_set<std::string> seen_groups;
-
-        for (const auto &entry_tuple : entries_to_evict) {
-            const auto &full_label = std::get<0>(entry_tuple);
-            size_t size = std::get<2>(entry_tuple);
-            auto [group_key_sv, _] = parse_full_label(full_label);
-            std::string group_key(group_key_sv);
-
-            group_bytes[group_key] += size;
-            if (seen_groups.find(group_key) == seen_groups.end()) {
-                seen_groups.insert(group_key);
-                unique_group_keys.push_back(group_key);
-                unique_full_labels.push_back(full_label);
-            }
-        }
-
-        std::vector<std::string> unpersisted_groups_to_remove;
-        if (record_) {
-            std::vector<bool> is_persisted_results = record_->is_persisted(unique_group_keys);
-            for (size_t i = 0; i < unique_group_keys.size(); ++i) {
-                if (!is_persisted_results[i]) {
-                    unpersisted_groups_to_remove.push_back(unique_group_keys[i]);
-                }
-            }
-        }
-
-        if (record_ && !unpersisted_groups_to_remove.empty()) {
-            record_->remove(unpersisted_groups_to_remove);
-        }
-
-        for (const auto &full_label : unique_full_labels) {
-            remove_unlocked(full_label);
-        }
-
         std::vector<std::tuple<std::string, size_t>> evicted_groups;
-        for (const auto &group_key : unique_group_keys) {
-            evicted_groups.emplace_back(group_key, group_bytes[group_key]);
+        while (lru_head_.lru_next != &lru_head_ && evicted_groups.size() < max_groups) {
+            EntryGroup *group = lru_head_.lru_next;
+            std::string group_key = *group->group_key_ptr;
+            size_t bytes = evict_group_unlocked(group, dropped);
+            evicted_groups.emplace_back(std::move(group_key), bytes);
         }
-
+        finish_eviction_unlocked(dropped);
         return evicted_groups;
     }
 
-    size_t evict_unlocked(size_t target_bytes) {
+    size_t evict_unlocked(size_t target_bytes, Dropped &dropped) {
         size_t evicted = 0;
-        while (current_bytes_ > target_bytes && lru_head_.lru_next != &lru_head_) {
-            EntryGroup *oldest = lru_head_.lru_next;
-            size_t bytes = oldest->total_bytes();
-
-            evicted += bytes;
-            current_bytes_ -= bytes;
-            total_entries_ -= oldest->entry_count();
-
-            lru_remove(oldest);
-            unpersisted_remove(oldest);
-
-            cache_.erase(*oldest->group_key_ptr);
-            evictions_.fetch_add(1, std::memory_order_relaxed);
-        }
+        while (current_bytes_ > target_bytes && lru_head_.lru_next != &lru_head_)
+            evicted += evict_group_unlocked(lru_head_.lru_next, dropped);
+        finish_eviction_unlocked(dropped);
         return evicted;
     }
 
@@ -806,7 +910,8 @@ class Mem::Impl {
         unpersisted_head_.unpersisted_prev = group;
     }
 
-    std::unordered_map<std::string, EntryGroup> cache_;
+    GroupMap cache_;
+    Reclaimer reclaimer_;
 
     EntryGroup lru_head_;
     EntryGroup unpersisted_head_;
@@ -814,6 +919,8 @@ class Mem::Impl {
     size_t capacity_bytes_;
     size_t current_bytes_;
     size_t total_entries_;
+    size_t entries_per_group_ = 0;
+    std::unordered_map<std::string, size_t> label_entries_per_group_;
 
     std::atomic<bool> evict_enabled_;
 
@@ -828,6 +935,7 @@ class Mem::Impl {
     std::atomic<uint64_t> hits_in_storage_{0};
     std::atomic<uint64_t> puts_{0};
     std::atomic<uint64_t> evictions_{0};
+    std::atomic<uint64_t> evicted_bytes_{0};
 
     Storage *storage_ = nullptr;
     Record *record_ = nullptr;
@@ -855,6 +963,11 @@ std::vector<std::pair<const char *, size_t>> Mem::get_unlocked(const std::vector
     return impl_->get_unlocked(keys, allow_using_omp);
 }
 
+std::vector<Mem::BufferRef> Mem::acquire(const std::vector<std::string> &keys,
+                                         bool allow_using_omp) {
+    return impl_->acquire(keys, allow_using_omp);
+}
+
 std::vector<bool> Mem::has(const std::vector<std::string> &keys) { return impl_->has(keys); }
 
 size_t Mem::remove(const std::string &key) { return impl_->remove(key); }
@@ -874,6 +987,13 @@ size_t Mem::force_evict_to_size(size_t target_bytes) {
 
 void Mem::set_evict_enabled(bool enabled) { impl_->set_evict_enabled(enabled); }
 bool Mem::is_evict_enabled() const { return impl_->is_evict_enabled(); }
+
+void Mem::set_entries_per_group(size_t count, const std::string &label) {
+    impl_->set_entries_per_group(count, label);
+}
+size_t Mem::entries_per_group(const std::string &label) const {
+    return impl_->entries_per_group(label);
+}
 
 void Mem::lock() { impl_->lock(); }
 void Mem::unlock() { impl_->unlock(); }
@@ -905,6 +1025,7 @@ uint64_t Mem::hits_in_storage() const { return impl_->hits_in_storage(); }
 uint64_t Mem::misses() const { return impl_->misses(); }
 uint64_t Mem::puts() const { return impl_->puts(); }
 uint64_t Mem::evictions() const { return impl_->evictions(); }
+uint64_t Mem::evicted_bytes() const { return impl_->evicted_bytes(); }
 uint64_t Mem::total_unzip_bytes() const { return impl_->total_unzip_bytes(); }
 uint64_t Mem::total_zip_bytes() const { return impl_->total_zip_bytes(); }
 double Mem::compression_ratio() const { return impl_->compression_ratio(); }

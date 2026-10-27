@@ -5,6 +5,9 @@ source "$SCRIPT_DIR/../setvars.sh"
 : "${MODEL:?Set MODEL in setvars.sh or the environment}"
 
 export LD_PRELOAD="$IAXL_LD_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}"
+# vLLM's V2 model runner corrupts requests recomputed after a KV load failure
+# (kv_load_failure_policy=recompute); use the V1 runner unless overridden.
+export VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0}
 
 parallel_args=(-tp "$TP_SIZE")
 if [[ "${DP_SIZE:-1}" -gt 1 ]]; then
@@ -25,7 +28,7 @@ if [[ "${KVSHRINK_HYBRID:-0}" == "1" ]]; then
 fi
 
 vllm serve "$MODEL" \
-    --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"KVShrinkConnector","kv_connector_module_path":"kvshrink.kvshrink_connector","kv_role":"kv_both","kv_load_failure_policy":"recompute"}' \
     --trust-remote-code \
     "${parallel_args[@]}" \
     "${device_args[@]}" \

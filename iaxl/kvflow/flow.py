@@ -48,18 +48,26 @@ class Task:
     label: str = None
     tensor_key: str = None
     chunk_labels: List[str] = None
+    # get() only: chunk indices that were not in the pool (and so not written), set once the
+    # task is finalized by get_wait().
+    failed: Optional[List[int]] = None
 
     def __repr__(self):
         return f"Task(label={self.label!r}, tensor_key={self.tensor_key!r}, chunk_labels={self.chunk_labels})"
 
 
 class KVFlow:
-    def __init__(self, persist_dir: str, cache_size_gb: float = 8.0, rank: int = 0):
+    def __init__(
+        self,
+        persist_dir: str,
+        cache_size_gb: float = 8.0,
+        rank: int = 0,
+        entries_per_group: int = 0,
+        label_entries_per_group: Optional[Dict[str, int]] = None,
+    ):
 
         self.enable_compression = envs.IAXL_KV_COMPRESSION
-        base_dir = envs.IAXL_CACHE_DIR
-        compression_subdir = "compressed" if self.enable_compression else "raw"
-        self.persist_dir = os.path.join(base_dir, compression_subdir, persist_dir)
+        self.persist_dir = self.persist_path(persist_dir)
         os.makedirs(self.persist_dir, exist_ok=True)
 
         self.cache_size_gb = cache_size_gb
@@ -74,7 +82,7 @@ class KVFlow:
         else:
             self.storage = None
 
-        self.sqlite_path = os.path.join(self.persist_dir, "chunks.db")
+        self.sqlite_path = self.record_path(persist_dir)
         self.record = Record(
             self.sqlite_path, cleanup_unpersisted=not self.has_only_mode
         )
@@ -116,18 +124,37 @@ class KVFlow:
             storage=self.storage,
             record=self.record,
         )
+        # Mem records a group itself once all its entries (one per layer) are stored.
+        self.mem.set_entries_per_group(entries_per_group)
+        for label, count in (label_entries_per_group or {}).items():
+            self.mem.set_entries_per_group(count, label)
+
+        self._load_failed_total = 0
 
         logger.info(
-            "Initialized: persist_dir=%s, cache_size_gb=%.2f, compression=%s",
+            "Initialized: persist_dir=%s, cache_size_gb=%.2f, compression=%s, "
+            "entries_per_group=%d, label_entries_per_group=%s",
             persist_dir,
             cache_size_gb,
             self.enable_compression,
+            entries_per_group,
+            label_entries_per_group,
         )
 
         self._persist_count = 0
         self._persist_bytes = 0
         self._evict_count = 0
         self._evict_bytes = 0
+
+    @staticmethod
+    def persist_path(persist_dir: str) -> str:
+        compression_subdir = "compressed" if envs.IAXL_KV_COMPRESSION else "raw"
+        return os.path.join(envs.IAXL_CACHE_DIR, compression_subdir, persist_dir)
+
+    @staticmethod
+    def record_path(persist_dir: str) -> str:
+        """Path of the Record (SQLite) database of a persist_dir."""
+        return os.path.join(KVFlow.persist_path(persist_dir), "chunks.db")
 
     def _ensure_streams(self):
         if self._streams_initialized:
@@ -182,6 +209,15 @@ class KVFlow:
                 chunk_dim, direction, description,
             )
         return Context.create(tensor, chunk_dim, direction, description, work_stream=work_stream)
+
+    def _collect_load_failures(self, task: Task):
+        task.failed = list(task.ctx.unzip_failed_indices())
+        if task.failed:
+            self._load_failed_total += len(task.failed)
+            logger.debug(
+                "Load of %s/%s: %d block(s) not in the DDR pool",
+                task.label, task.tensor_key, len(task.failed),
+            )
 
     @profile_func(
         lambda self,
@@ -429,6 +465,7 @@ class KVFlow:
 
             result.ctx.unzip_wait()
             result.ctx.xfer_wait()
+            self._collect_load_failures(result)
 
             result.ctx = None
 
@@ -445,10 +482,11 @@ class KVFlow:
         self.record.sync()
         return True
 
-    @profile_func(lambda self, label, chunk_labels: f"(count={len(chunk_labels)})")
-    def put_finish(self, label: str, chunk_labels: List[str]) -> None:
-        assert self.record is not None
-        self.record.submit(label, chunk_labels)
+    @staticmethod
+    def load_failures(get_results: Dict[str, Task]) -> set:
+        """Chunk indices that failed to load in the finalized tasks of one get(): the block was
+        not in the pool (e.g. evicted after the lookup), so its destination was not written."""
+        return {index for task in get_results.values() if task.failed for index in task.failed}
 
     @profile_func(lambda self, label, chunk_labels: f"(count={len(chunk_labels)})")
     def has(self, label: str, chunk_labels: List[str]) -> List[bool]:
@@ -506,6 +544,9 @@ class KVFlow:
             "misses": self.mem.misses,
             "puts": self.mem.puts,
             "evictions": self.mem.evictions,
+            "evicted_bytes": self.mem.evicted_bytes,
+            # One per (block, layer) that was missing from the pool at load time.
+            "load_failed_entries_total": self._load_failed_total,
             "total_unzip_bytes": self.mem.total_unzip_bytes,
             "total_zip_bytes": self.mem.total_zip_bytes,
             "compression_ratio (unzip/zip, higher=better)": round(

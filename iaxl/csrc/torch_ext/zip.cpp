@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -33,6 +34,12 @@ static inline uint64_t metrics_sum_tensor_bytes(const std::vector<torch::Tensor>
     return total;
 }
 
+// Every layer of a load hits the same missing blocks; log the first few, then every 1000th.
+static inline bool should_log(std::atomic<uint64_t> &count) {
+    uint64_t n = count.fetch_add(1, std::memory_order_relaxed);
+    return n < 10 || n % 1000 == 0;
+}
+
 struct UnzipFromMemWork : std::enable_shared_from_this<UnzipFromMemWork> {
     Context *ctx;
     kv_pool::Mem *mem;
@@ -48,58 +55,71 @@ struct UnzipFromMemWork : std::enable_shared_from_this<UnzipFromMemWork> {
 
         const size_t n = chunk_labels.size();
 
-        mem->acquire_deletion_guard();
-
-        std::vector<const char *> data_ptrs(n);
+        // The refs keep the buffers alive even if their entries are evicted meanwhile.
+        std::vector<kv_pool::Mem::BufferRef> refs;
         {
             PROFILE_SCOPE("cache_get");
-            auto results = mem->get(chunk_labels, true);
+            refs = mem->acquire(chunk_labels, true);
+        }
 
-            for (size_t i = 0; i < n; i++) {
-                const auto &[ptr, size] = results[i];
-                (void)size;
-                if (!ptr) {
-                    mem->release_deletion_guard();
-
-                    if (!is_retry) {
-                        std::cout << "[KVClip] cache miss on unzip (will retry): "
-                                  << chunk_labels[i] << "\n";
-                        auto self = shared_from_this();
-                        omp_queue().submit(
-                            [self]() {
-                                try {
-                                    self->execute(true);
-                                } catch (...) {
-                                    IAXL_CHECK(
-                                        false,
-                                        "unzip_from_mem retry: unexpected asynchronous exception");
-                                }
-                            },
-                            TaskQueue::PRIORITY_LOW);
-                        return;
-                    }
-
-                    IAXL_CHECK(false, "unzip_from_mem: cache key missing after retry");
-                }
-                data_ptrs[i] = ptr;
+        std::vector<const char *> data_ptrs;
+        std::vector<torch::Tensor> hit_tensors;
+        std::vector<int64_t> hit_indices;
+        std::vector<int64_t> failed;
+        data_ptrs.reserve(n);
+        hit_tensors.reserve(n);
+        hit_indices.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            if (refs[i].data) {
+                data_ptrs.push_back(refs[i].data.get());
+                hit_tensors.push_back(cpu_tensors[i]);
+                hit_indices.push_back(chunk_indices[i]);
+            } else {
+                failed.push_back(chunk_indices[i]);
             }
         }
 
-        {
-            PROFILE_SCOPE("decompress");
-            METRICS_TIMER_START(metrics_decompress);
-            kv_zip_decompress_batch(data_ptrs, cpu_tensors);
-            METRICS_ADD_DECOMPRESS(metrics_decompress, metrics_sum_tensor_bytes(cpu_tensors));
+        if (!failed.empty() && !is_retry) {
+            // An in-flight zip_to_mem for the same blocks may still be queued; retry behind it.
+            static std::atomic<uint64_t> retry_logs{0};
+            if (should_log(retry_logs)) {
+                std::cout << "[IAXL] unzip_from_mem(" << ctx->name() << "): " << failed.size()
+                          << "/" << n << " blocks not in the pool, retrying\n";
+            }
+            auto self = shared_from_this();
+            omp_queue().submit(
+                [self]() {
+                    try {
+                        self->execute(true);
+                    } catch (...) {
+                        IAXL_CHECK(false,
+                                   "unzip_from_mem retry: unexpected asynchronous exception");
+                    }
+                },
+                TaskQueue::PRIORITY_LOW);
+            return;
         }
 
-        mem->release_deletion_guard();
-
-        {
-
-            ctx->xfer_chunks_batch(chunk_indices, cpu_tensors);
-
-            ctx->xfer_finish();
+        static std::atomic<uint64_t> fail_logs{0};
+        if (!failed.empty() && should_log(fail_logs)) {
+            std::cerr << "[IAXL] unzip_from_mem(" << ctx->name() << "): " << failed.size() << "/"
+                      << n << " blocks missing from the pool after retry; reporting them as "
+                      << "failed loads\n";
         }
+
+        if (!data_ptrs.empty()) {
+            {
+                PROFILE_SCOPE("decompress");
+                METRICS_TIMER_START(metrics_decompress);
+                kv_zip_decompress_batch(data_ptrs, hit_tensors);
+                METRICS_ADD_DECOMPRESS(metrics_decompress, metrics_sum_tensor_bytes(hit_tensors));
+            }
+            refs.clear();
+            ctx->xfer_chunks_batch(hit_indices, hit_tensors);
+        }
+
+        ctx->xfer_finish();
+        ctx->set_unzip_failed(std::move(failed));
 
         promise->set_value();
     }
@@ -166,6 +186,7 @@ void Context::unzip_from_mem(kv_pool::Mem &mem, const std::string &label,
     const size_t n = full_chunk_labels.size();
 
     reset_async_state();
+    unzip_failed_.clear();
 
     auto promise = std::make_shared<std::promise<void>>();
     unzip_future_ = promise->get_future();

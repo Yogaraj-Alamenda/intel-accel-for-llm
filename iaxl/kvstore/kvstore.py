@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import torch
 import numpy as np
 from typing import Dict, List, Mapping, Optional, TYPE_CHECKING, Union
@@ -9,6 +10,7 @@ import psutil
 from ..envs import envs
 from ..kvflow import KVFlow, Task, get_accelerator_device
 from ..remote_pool.remote_tensor import RemoteTensor
+from ..torch_ext import Record
 from ..utils.profiler import (
     profile_scope,
     profile_cross_scope,
@@ -37,7 +39,10 @@ class KVStoreLocal:
         layer_names: Optional[List[str]] = None,
         rank: int = 0,
         tp_size: int = 1,
+        label_layers: Optional[Mapping[str, List[str]]] = None,
     ):
+        # label_layers maps each non-default label to the layers put under it (e.g. the mamba
+        # layers of a hybrid model); the default label holds every other layer.
 
         if kv_caches is None and layer_names is None:
             raise ValueError(
@@ -64,6 +69,17 @@ class KVStoreLocal:
             self.layer_names = list(kv_caches.keys())
         else:
             self.layer_names = layer_names
+
+        self.label_layers = {label: list(names) for label, names in (label_layers or {}).items()}
+        labelled = [name for names in self.label_layers.values() for name in names]
+        if set(labelled) - set(self.layer_names) or len(labelled) != len(set(labelled)):
+            raise ValueError(
+                f"label_layers must map distinct registered layers to labels, got {self.label_layers}"
+            )
+        # Label each layer is stored under (None = the default label).
+        self._layer_label = {
+            name: label for label, names in self.label_layers.items() for name in names
+        }
 
         self.skip_compression_count = min(
             envs.IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS, len(self.layer_names)
@@ -102,7 +118,24 @@ class KVStoreLocal:
             persist_dir=final_persist_dir,
             cache_size_gb=pool_size_gb,
             rank=rank,
+            # A block is recorded (visible to has()) only once every layer of its label is stored.
+            entries_per_group=0 if self.has_only_mode else len(self.layer_names) - len(labelled),
+            label_entries_per_group=None if self.has_only_mode else {
+                label: len(names) for label, names in self.label_layers.items()
+            },
         )
+        # The lookup (has-only mode) claims a block only if every TP rank of this group has it:
+        # each rank evicts independently, and a rank missing a claimed block fails its load.
+        self._peer_records = []
+        if self.has_only_mode:
+            for peer in range(rank + 1, rank + tp_size):
+                path = KVFlow.record_path(f"{model_name}_rank{peer}")
+                if os.path.exists(path):
+                    self._peer_records.append(Record(path, cleanup_unpersisted=False))
+                else:
+                    logger.warning(
+                        "Record of TP rank %d not found at %s; lookups skip that rank", peer, path
+                    )
         start_profiling()
 
         logger.info(
@@ -166,9 +199,13 @@ class KVStoreLocal:
             raise RuntimeError(
                 "put() not available in has-only mode (kv_caches not provided)"
             )
-
         if layer_names is None:
             layer_names = self.layer_names
+        # A block is recorded once its label's layer count is reached, so a layer stored under
+        # the wrong label would mark the block complete too early (or never).
+        wrong = [name for name in layer_names if self._layer_label.get(name) != label]
+        if wrong:
+            raise ValueError(f"put() layers {wrong} are not declared under label {label!r}")
 
         tensors = {name: self.kv_caches[name] for name in layer_names}
 
@@ -188,10 +225,6 @@ class KVStoreLocal:
             description=description,
             skip_compression_count=local_skip,
         )
-
-        if label is not None or self.layer_names[-1] in layer_names:
-            self.tensorzip.put_finish(label or self.LABEL, block_hashs)
-            self.tensorzip.record_flush()
 
         return result
 
@@ -258,6 +291,11 @@ class KVStoreLocal:
             wait=wait,
         )
 
+    def load_failures(self, get_results: Dict[str, Task]) -> set:
+        """Block indices that failed to load in the finished layers of one get() (block
+        missing from the pool). Their KV was not written; the caller must recompute them."""
+        return KVFlow.load_failures(get_results)
+
     def has(self, block_hashs: Optional[List[str]] = None,
             label: Optional[str] = None,
             truncate: bool = True) -> List[bool]:
@@ -269,6 +307,9 @@ class KVStoreLocal:
             label=label or self.LABEL,
             chunk_labels=block_hashs,
         )
+        for record in self._peer_records:
+            peer = record.has(label or self.LABEL, block_hashs)
+            results = [mine and theirs for mine, theirs in zip(results, peer)]
         if not truncate:
             return results
 

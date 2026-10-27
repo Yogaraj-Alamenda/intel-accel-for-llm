@@ -67,7 +67,32 @@ flowchart TD
 
 The scheduler returns both the number of externally cached tokens and whether the request should load asynchronously. Synchronous requests are merged into a load batch. Asynchronous requests retain separate task state so each request can be resumed independently.
 
-With early-layer promotion, the worker reports a load complete after the first configured layers are ready. vLLM can then begin prefill while IAXL continues loading later layers; `wait_for_layer_load()` enforces the dependency immediately before each layer consumes its KV data.
+With early-layer promotion, the worker reports a load complete after the first configured layers are ready. vLLM can then begin prefill while IAXL continues loading later layers; `wait_for_layer_load()` enforces the dependency immediately before each layer consumes its KV data. Early promotion is turned off when vLLM prefix caching is enabled (as on hybrid models): vLLM publishes a load's blocks to its prefix cache once the load is reported complete, so another request could otherwise read layers that are still loading, or that fail to load.
+
+## DDR Pool Capacity and Lookup Consistency
+
+`IAXL_DDR_POOL_SIZE_GB` is a hard budget for each worker's host cache. When a store pushes the pool past it, IAXL evicts least-recently-used blocks until the pool is a small batch (64 MiB, at most 1/16 of the budget) below it. Eviction therefore runs once per batch of stores, each pass is short, and the evicted memory is freed on a separate thread rather than on the IAXL worker that compresses and decompresses. `POST /v1/cache/evict` uses the same eviction path.
+
+Eviction never waits for loads, and loads never block eviction. Each block's layers are held as one reference-counted group: a load takes a reference to every group it decompresses, so an eviction that runs meanwhile only drops the pool's reference, and the group is freed when the load finishes with it. A load also marks the blocks it reads as most recently used, so a block that one layer has read is the last candidate for eviction before the next layer reads it.
+
+The scheduler's lookup reads the per-rank SQLite record, not DRAM, so the record follows the pool:
+
+- A block is recorded only after the compressed data for **all** of its layers is stored, not when the save is submitted. On hybrid models the mamba states are saved under their own `mamba` label, so each label counts only its own layers: the connector passes `label_layers={"mamba": [...]}` to `KVStore`, and the default label covers the remaining (attention) layers.
+- Evicting a block removes its record entry, unless the block was persisted to storage; persisted blocks reload from disk on the next load.
+- Each tensor-parallel rank evicts independently, so the lookup reads the record of every rank in the TP group and claims a block only if all of them have it. A rank whose record is not visible to the scheduler (e.g. on another host) is skipped with a warning.
+
+A lookup can still go stale between the scheduler's check and the worker's load. For example, a rank may evict the block in that window. In that case the load does not abort. The missing blocks are not written; the connector reports them through `get_block_ids_with_load_errors()`, and the request falls back to vLLM's `kv_load_failure_policy`. Use `"recompute"` (as `examples/kvshrink-vllm-serve.sh` does) to recompute those blocks; the default `"fail"` fails only the affected requests.
+
+The connector also keeps the recovery bounded:
+
+- A load's failed blocks are reported only after all of its layers are done, so no load is still writing into blocks that vLLM rolls back or frees. Each layer's task records its own failures (for the remote pool, the daemon sends them with the layer's `done` notification), and the connector reports the union once per load.
+- An asynchronous load with failed blocks in its first layers is not promoted early. Every forward pass waits, layer by layer, for all early-promoted loads, since other requests may share their blocks; failures in a promoted load's later layers are reported only after a pass that runs its request, while vLLM can still roll it back.
+- A request finished (e.g. aborted) while its asynchronous load is still running is freed by vLLM on `finished_recving` once every worker has reported the load, and must never appear in `finished_sending`. The scheduler-side connector knows which requests these are (it sees the aggregated worker output) and passes them to the workers, which report such a load only after all of its layers are written and never report it as finished sending.
+- The scheduler treats a failed block as a miss until it has been saved again. Otherwise the lookup would keep matching it, and every retry would fail the same way.
+
+> **Multiple KV cache groups:** vLLM 0.29 cannot recover failed loads when the model has more than one KV cache group (hybrid GDN/Mamba or sliding-window models under the hybrid allocator); its scheduler handles only a single block table. In that case `get_block_ids_with_load_errors()` raises a `RuntimeError` naming the cause instead of reporting the blocks. Size `IAXL_DDR_POOL_SIZE_GB` so that blocks are rarely evicted between the lookup and the load.
+
+> **vLLM model runner:** with vLLM 0.29, `kv_load_failure_policy="recompute"` produces corrupted output under the V2 model runner (the default), which does not realign its token state after the scheduler discards a failed step. Set `VLLM_USE_V2_MODEL_RUNNER=0` when recompute may be triggered; `examples/kvshrink-vllm-serve.sh` does this by default.
 
 ## Layer-Pipelined Load
 

@@ -121,9 +121,13 @@ class Record {
 
     void submit(const std::string &label, const std::vector<std::string> &chunk_labels);
 
+    // Same as submit(), but takes ready-made group keys ("label:chunk_id").
+    void submit_group_keys(const std::vector<std::string> &group_keys);
+
     void mark_persisted(const std::vector<std::string> &chunk_labels);
 
-    void remove(const std::vector<std::string> &chunk_labels);
+    // wait=false only enqueues the delete; FIFO order with earlier submits is preserved.
+    void remove(const std::vector<std::string> &chunk_labels, bool wait = true);
 
     std::vector<bool> is_persisted(const std::vector<std::string> &chunk_labels);
 
@@ -174,6 +178,18 @@ class Mem {
     std::vector<std::pair<const char *, size_t>> get_unlocked(const std::vector<std::string> &keys,
                                                               bool allow_using_omp = false);
 
+    // A shared reference to a stored buffer. It stays valid after the entry is evicted or
+    // replaced; the buffer is freed when the last reference is dropped. data is null on a miss.
+    struct BufferRef {
+        std::shared_ptr<const char> data;
+        size_t size = 0;
+    };
+
+    // Like get(), but returns shared references, so the caller may read the buffers without
+    // holding any lock while eviction runs concurrently.
+    std::vector<BufferRef> acquire(const std::vector<std::string> &keys,
+                                   bool allow_using_omp = false);
+
     std::vector<bool> has(const std::vector<std::string> &keys);
 
     size_t remove(const std::string &key);
@@ -187,6 +203,13 @@ class Mem {
 
     void set_evict_enabled(bool enabled);
     bool is_evict_enabled() const;
+
+    // When > 0, a group is recorded only once it holds this many entries (one per tensor/layer),
+    // i.e. after its data is actually stored. 0 keeps the record fully caller-managed.
+    // A non-empty label sets the count for groups "label:*" only (labels whose groups hold a
+    // different set of layers); other labels use the default set with an empty label.
+    void set_entries_per_group(size_t count, const std::string &label = "");
+    size_t entries_per_group(const std::string &label = "") const;
 
     void lock();
     void unlock();
@@ -214,6 +237,7 @@ class Mem {
     uint64_t misses() const;
     uint64_t puts() const;
     uint64_t evictions() const;
+    uint64_t evicted_bytes() const;
     uint64_t total_unzip_bytes() const;
     uint64_t total_zip_bytes() const;
     double compression_ratio() const;

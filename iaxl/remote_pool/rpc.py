@@ -31,6 +31,8 @@ HELLO, REGISTER_KV_CACHES, REGISTER_LAYERS, PUT, GET, HAS, STATUS, METRICS, PERS
 
 REQ_FMT, RESP_FMT, PUSH_FMT = "<cBIQ", "<cIB", "<cIH"
 REQ_SIZE, RESP_SIZE, PUSH_SIZE = (struct.calcsize(f) for f in (REQ_FMT, RESP_FMT, PUSH_FMT))
+# A `done` push for a get layer is followed by the uint32 block indices that failed to load.
+FAILED_DTYPE = np.dtype("<u4")
 
 
 def rank_port(port: int, rank: int) -> int:
@@ -123,10 +125,10 @@ def _json_call(name: str):
 # -- client --------------------------------------------------------------------
 
 class RpcChannel:
-    """Synchronous, single-outstanding client channel. `on_push(job_id, layer_idx)`
+    """Synchronous, single-outstanding client channel. `on_push(job_id, layer_idx, failed)`
     receives `done` pushes that arrive while waiting for responses or in drain()."""
 
-    def __init__(self, xfer, peer: str, on_push: Callable[[int, int], None]):
+    def __init__(self, xfer, peer: str, on_push: Callable[[int, int, List[int]], None]):
         self.xfer, self.peer, self.on_push = xfer, peer, on_push
         self.buf = _ctrl_buffer(pin=True)
         self.buf_np = self.buf.numpy()
@@ -164,7 +166,8 @@ class RpcChannel:
             kind = msg[:1]
             if kind == b"D":
                 _, job_id, layer_idx = struct.unpack_from(PUSH_FMT, msg)
-                self.on_push(job_id, layer_idx)
+                failed = np.frombuffer(msg, FAILED_DTYPE, offset=PUSH_SIZE).tolist()
+                self.on_push(job_id, layer_idx, failed)
             elif kind == b"R":
                 _, seq, ok = struct.unpack_from(RESP_FMT, msg)
                 self._resp = (seq, ok, msg[RESP_SIZE:])
@@ -235,7 +238,8 @@ class KVStoreService:
             assert self.remote_bases[rt.base] == (shape, dtype), name
             kv_caches[name] = rt
         self.kvstore = KVStoreLocal(model_name=req["model_name"], block_dim=block_dim, kv_caches=kv_caches,
-                                    rank=self.rank, tp_size=self.tp_size)
+                                    rank=self.rank, tp_size=self.tp_size,
+                                    label_layers=req.get("label_layers"))
         self._set_layers(self.kvstore.layer_names)
         return pack_json({"layer_names": self.layer_names})
 
@@ -311,8 +315,9 @@ class KVStoreService:
 
     # -- completion polling --------------------------------------------------
     def poll_done(self):
-        """Yield (job_id, layer_idx, peer) for every layer that completed since the
-        last call; completed layers release their pool blocks immediately."""
+        """Yield (job_id, layer_idx, peer, failed) for every layer that completed since the
+        last call; completed layers release their pool blocks immediately. `failed` lists the
+        block indices a get layer could not load."""
         kv = self.kvstore
         for job_id in list(self.jobs):
             job = self.jobs[job_id]
@@ -320,7 +325,8 @@ class KVStoreService:
             for name in list(job.not_done):
                 if wait(job.tasks, [name], wait=False):
                     job.not_done.discard(name)
-                    yield job_id, self.layer_idx[name], job.peer
+                    failed = [] if job.is_put else (job.tasks[name].failed or [])
+                    yield job_id, self.layer_idx[name], job.peer, failed
             if not job.not_done:
                 del self.jobs[job_id]
 
@@ -342,9 +348,10 @@ def serve(xfer, service: KVStoreService, idle_spin: int = 2000, idle_sleep: floa
             xfer.send_notif(peer, struct.pack(RESP_FMT, b"R", seq, ok) + body)
             if method == STOP:
                 return
-        for job_id, layer_idx, peer in service.poll_done():
+        for job_id, layer_idx, peer, failed in service.poll_done():
             busy = True
-            xfer.send_notif(peer, struct.pack(PUSH_FMT, b"D", job_id, layer_idx))
+            xfer.send_notif(peer, struct.pack(PUSH_FMT, b"D", job_id, layer_idx)
+                            + np.asarray(failed, FAILED_DTYPE).tobytes())
         if busy or service.jobs:
             idle = 0
         elif idle < idle_spin:

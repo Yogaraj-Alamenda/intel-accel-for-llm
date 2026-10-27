@@ -25,6 +25,7 @@ class RemoteTask:
     job_id: int
     tensor_key: str
     done: bool = False
+    failed: Optional[List[int]] = None  # get only: block indices the daemon could not load
 
 
 class KVStoreRemote:
@@ -40,6 +41,7 @@ class KVStoreRemote:
         tp_size: int = 1,
         daemon_ip: Optional[str] = None,
         daemon_port: Optional[int] = None,
+        label_layers: Optional[Dict[str, List[str]]] = None,
     ):
         if kv_caches is None and layer_names is None:
             raise ValueError("At least one of kv_caches or layer_names must be provided")
@@ -56,7 +58,8 @@ class KVStoreRemote:
         self.tp_size = tp_size
         self.has_only_mode = kv_caches is None
         self._pending: Dict[int, list] = {}  # job_id -> [tasks, remaining]
-        self._early_done: Dict[int, set] = {}  # done notifications that beat the job_id response
+        # done notifications that beat the job_id response: job_id -> {layer_idx: failed}
+        self._early_done: Dict[int, Dict[int, List[int]]] = {}
 
         if self.has_only_mode:
             name, self.peer = "client_sched", "daemon_sched"
@@ -80,7 +83,8 @@ class KVStoreRemote:
             }
             self.rpc.call(rpc.REGISTER_KV_CACHES, rpc.pack_json({
                 "layers": layers, "block_dim": block_dim, "model_name": model_name,
-                "rank": rank, "tp_size": tp_size}))
+                "rank": rank, "tp_size": tp_size,
+                "label_layers": {k: list(v) for k, v in (label_layers or {}).items()}}))
             self.layer_names = list(kv_caches.keys())
             first = next(iter(kv_caches.values()))
             self.kvcache_shape = list(first.shape)
@@ -108,8 +112,8 @@ class KVStoreRemote:
         job_id = int.from_bytes(self.rpc.call(method, payload), "little")
         tasks = {n: RemoteTask(job_id, n) for n in names}
         self._pending[job_id] = [tasks, len(tasks)]
-        for layer_idx in self._early_done.pop(job_id, set()):
-            self._mark_done(job_id, layer_idx)
+        for layer_idx, failed in self._early_done.pop(job_id, {}).items():
+            self._mark_done(job_id, layer_idx, failed)
         return tasks
 
     def put(self, block_indices, block_hashs, layer_names=None, description="",
@@ -139,19 +143,26 @@ class KVStoreRemote:
     def get_wait(self, get_results, layer_names=None, wait=True) -> bool:
         return self._wait(get_results, layer_names, wait, "get_wait")
 
-    def _on_done(self, job_id: int, layer_idx: int):
+    @staticmethod
+    def load_failures(get_results: Dict[str, RemoteTask]) -> set:
+        """Block indices that failed to load in the finished layers of one get() (see
+        KVStoreLocal.load_failures)."""
+        return {index for task in get_results.values() if task.failed for index in task.failed}
+
+    def _on_done(self, job_id: int, layer_idx: int, failed: List[int]):
         entry = self._pending.get(job_id)
         if entry is None:
-            self._early_done.setdefault(job_id, set()).add(layer_idx)
+            self._early_done.setdefault(job_id, {})[layer_idx] = failed
             return
-        self._mark_done(job_id, layer_idx)
+        self._mark_done(job_id, layer_idx, failed)
 
-    def _mark_done(self, job_id: int, layer_idx: int):
+    def _mark_done(self, job_id: int, layer_idx: int, failed: List[int]):
         entry = self._pending[job_id]
         task = entry[0][self.layer_names[layer_idx]]
         if task.done:
             return
         task.done = True
+        task.failed = failed
         entry[1] -= 1
         if entry[1] == 0:
             del self._pending[job_id]
