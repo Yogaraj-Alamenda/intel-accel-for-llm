@@ -19,6 +19,7 @@ from ..envs import envs
 from ..torch_ext import Record
 from ..torch_ext import Context, GpuTransferDirection
 from ..torch_ext import Mem, Storage
+from ..torch_ext import task_queue_set_bundles_priority, task_queue_sort_priority_level
 from .. import torch_ext as _iqt
 from ..utils import cuda_available
 from .scratch_pool import ScratchPool
@@ -311,7 +312,7 @@ class KVFlow:
         return True
 
     @profile_func(
-        lambda self, label, tensors, chunk_dim, chunk_indices, chunk_labels, description: (
+        lambda self, label, tensors, chunk_dim, chunk_indices, chunk_labels, description, **_: (
             f"({description},count={len(chunk_indices)})"
         )
     )
@@ -323,7 +324,11 @@ class KVFlow:
         chunk_indices: List[int],
         chunk_labels: List[str],
         description: str = "",
+        priorities: Optional[Dict[str, int]] = None,
+        bundle_id: int = 0,
+        sort_keys: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Task]:
+        """priorities / sort_keys: OMP-Main level / sort key per tensor key (None: 0 / -1)."""
 
         self._ensure_streams()
         assert chunk_indices is not None and chunk_labels is not None
@@ -344,6 +349,10 @@ class KVFlow:
             assert tensor.is_contiguous(), "all GPU tensors must be contiguous"
             assert tensor.shape == first_t.shape, "all tensors must have the same shape"
             assert tensor.dtype == first_t.dtype, "all tensors must have the same dtype"
+            if priorities is not None and tensor_key not in priorities:
+                raise ValueError(f"priorities is missing tensor key {tensor_key}")
+            if sort_keys is not None and tensor_key not in sort_keys:
+                raise ValueError(f"sort_keys is missing tensor key {tensor_key}")
 
         results = {}
         num_chunks = len(chunk_indices)
@@ -373,8 +382,18 @@ class KVFlow:
                 if stream_sync_on_get and self.device_type is not None:
                     ctx.xfer_wait_cur_stream()
                 first_tensor = False
+            priority = 0 if priorities is None else priorities[tensor_key]
+            sort_key = -1 if sort_keys is None else sort_keys[tensor_key]
             ctx.unzip_from_mem(
-                self.mem, label, tensor_key, chunk_labels, chunk_indices, cpu_tensors
+                self.mem,
+                label,
+                tensor_key,
+                chunk_labels,
+                chunk_indices,
+                cpu_tensors,
+                priority=priority,
+                bundle_id=bundle_id,
+                sort_key=sort_key,
             )
 
             results[tensor_key] = task = Task(
@@ -388,6 +407,14 @@ class KVFlow:
                 self._pending_gets[id(task)] = task
 
         return results
+
+    def set_bundles_priority(self, bundle_ids: List[int], priority: int) -> int:
+        """Moves waiting OMP-Main tasks of ``bundle_ids`` from less urgent levels to ``priority``; returns the count."""
+        return task_queue_set_bundles_priority(bundle_ids, priority)
+
+    def sort_priority_level(self, priority: int) -> None:
+        """Stable-sorts the waiting OMP-Main tasks of level ``priority`` by sort key."""
+        task_queue_sort_priority_level(priority)
 
     @profile_func(lambda self, get_results, *_: f"(count={len(get_results)})")
     def get_wait(

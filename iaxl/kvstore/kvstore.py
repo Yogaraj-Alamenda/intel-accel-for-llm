@@ -64,6 +64,10 @@ class KVStoreLocal:
             self.layer_names = list(kv_caches.keys())
         else:
             self.layer_names = layer_names
+        # Layer index of each layer: the sort key of its load tasks.
+        self._layer_order: Dict[str, int] = {}
+        for index, name in enumerate(self.layer_names):
+            self._layer_order[name] = index
 
         self.skip_compression_count = min(
             envs.IAXL_KVSTORE_SKIP_COMPRESSION_LAYERS, len(self.layer_names)
@@ -220,7 +224,10 @@ class KVStoreLocal:
         layer_names: Optional[List[str]] = None,
         description: str = "",
         label: Optional[str] = None,
+        priorities: Optional[Dict[str, int]] = None,
+        bundle_id: int = 0,
     ) -> Dict[str, Task]:
+        # priorities: OMP-Main level per layer name (None: 0); bundle_id: for set_bundles_priority.
         if self.has_only_mode:
             raise RuntimeError(
                 "get() not available in has-only mode (kv_caches not provided)"
@@ -230,6 +237,9 @@ class KVStoreLocal:
             layer_names = self.layer_names
 
         tensors = {name: self.kv_caches[name] for name in layer_names}
+        sort_keys: Dict[str, int] = {}
+        for name in layer_names:
+            sort_keys[name] = self._layer_order[name]
 
         return self.tensorzip.get(
             label=label or self.LABEL,
@@ -238,7 +248,18 @@ class KVStoreLocal:
             chunk_indices=block_indices,
             chunk_labels=block_hashs,
             description=description,
+            priorities=priorities,
+            bundle_id=bundle_id,
+            sort_keys=sort_keys,
         )
+
+    def set_bundles_priority(self, bundle_ids: List[int], priority: int) -> int:
+        # Moves waiting load tasks of these bundles from less urgent levels to `priority`.
+        return self.tensorzip.set_bundles_priority(bundle_ids, priority)
+
+    def sort_priority_level(self, priority: int) -> None:
+        # Sorts the waiting load tasks of level `priority` by layer.
+        self.tensorzip.sort_priority_level(priority)
 
     def get_wait(
         self,
